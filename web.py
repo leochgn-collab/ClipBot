@@ -680,6 +680,18 @@ def settings():
         vd["max_vods"] = max(1, min(int(f.get("vods_max") or 2), 10))
         vd["min_gap_seconds"] = max(30, min(int(f.get("vods_gap") or 120), 3600))
         vd["title_keywords"] = [k.strip() for k in f.get("vods_kw", "").split(",") if k.strip()]
+        cl = cfg["sources"].setdefault("clippers", {})
+        cl["enabled"] = "cl_on" in f
+        cl["lookback_hours"] = max(6, min(int(f.get("cl_lookback") or 72), 336))
+        cl["per_channel"] = max(1, min(int(f.get("cl_per") or 10), 50))
+        urls = []
+        for u in re.split(r"[\s,]+", f.get("cl_channels", "")):
+            u = u.strip()
+            if u.startswith("@"):
+                u = "https://www.youtube.com/" + u
+            if re.fullmatch(r"https://(www\.|m\.)?youtube\.com/(@[\w.\-]+|channel/[\w\-]+|c/[\w.\-]+)(/shorts|/videos)?/?", u):
+                urls.append(u)
+        cl["channels"] = urls[:30]
         meta["fallback_title"] = f.get("fallback_title", "").strip() or "Moment fou en live"
         tw["min_views"] = num("min_views", 0)
         if f.get("tw_id"):
@@ -773,6 +785,15 @@ def settings():
 <div><label>Écart entre 2 extraits (s)</label><input type="number" name="vods_gap" min="30" value="{{(tw.vods or {}).min_gap_seconds or 120}}"></div></div>
 <label>Seulement les lives dont le titre contient (virgules, vide = tous)</label>
 <input name="vods_kw" value="{{ ((tw.vods or {}).title_keywords or [])|join(', ') }}" placeholder="GTA"></div>
+
+<div class="card"><h2 style="margin-top:0">Chaînes de clippers YouTube</h2>
+<p class="mut" style="font-size:13px">ClipBot regarde les Shorts récents de ces chaînes, retrouve par le son le passage du live qu'ils ont clippé, et refait ce moment fort depuis le live d'origine (avec ton design). Ces moments passent en priorité, avant les pics de son. Nécessite « Moments forts des lives » activé.</p>
+{% set cl = cfg.sources.clippers or {} %}
+<label><input type="checkbox" name="cl_on" style="width:auto" {{'checked' if cl.enabled}}> Activer</label>
+<label>Chaînes (une par ligne : lien ou @pseudo)</label>
+<textarea name="cl_channels" rows="4" placeholder="https://www.youtube.com/@NomDuClipper">{{ (cl.channels or [])|join('\n') }}</textarea>
+<div class="row"><div><label>Shorts récents de moins de (heures)</label><input type="number" name="cl_lookback" min="6" max="336" value="{{cl.lookback_hours or 72}}"></div>
+<div><label>Shorts regardés par chaîne</label><input type="number" name="cl_per" min="1" max="50" value="{{cl.per_channel or 10}}"></div></div></div>
 
 <div class="card"><h2 style="margin-top:0">Publication</h2>
 {% for p,n in [('youtube','YouTube Shorts'),('tiktok','TikTok')] %}<div class="row" style="margin-bottom:8px">

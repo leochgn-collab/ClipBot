@@ -23,6 +23,13 @@ sources:
         min_views: 500             # seuil propre à cette chaîne (optionnel)
       - login: autre_streamer
 
+  # Chaînes YouTube de clippers : ClipBot retrouve dans le live d'origine le passage qu'ils ont clippé
+  clippers:
+    enabled: false
+    lookback_hours: 72             # Shorts publiés il y a moins de 72 h
+    per_channel: 10                # Shorts regardés par chaîne de clipper
+    channels: []                   # ex. ["https://www.youtube.com/@NomDuClipper"]
+
   youtube:
     enabled: false
     lookback_hours: 72             # vidéos publiées il y a moins de 72 h…

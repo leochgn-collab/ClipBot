@@ -257,19 +257,159 @@ def loudness_per_second(stream):
     return levels
 
 
-def vod_loudness(cfg, vod_id, vod_url):
-    """Analyse d'une rediffusion, gardée en cache (elle ne change plus une fois le live fini)."""
-    cache = resolve(cfg.get("work_dir", "work")) / "vodcache" / f"{vod_id}.json"
-    if cache.exists():
-        return json.loads(cache.read_text())
+FEAT_RATE = 20          # images d'empreinte par seconde (50 ms)
+_BANDS = ((60, 250), (250, 600), (600, 1200), (1200, 1990))
+
+
+def analyze_audio(source):
+    """Lit un son (fichier ou flux) en une passe et renvoie :
+    - levels : volume (dB) seconde par seconde, pour repérer les pics ;
+    - feats  : empreinte sonore 20 fois/s sur 4 bandes, pour retrouver un extrait dans un live."""
+    import numpy as np
+    sr, hop = 4000, 200
+    proc = subprocess.Popen(["ffmpeg", "-nostats", "-loglevel", "error", "-i", source, "-vn", "-ac", "1",
+                             "-ar", str(sr), "-f", "s16le", "-"], stdout=subprocess.PIPE)
+    freqs = np.fft.rfftfreq(hop, 1 / sr)
+    masks = [(freqs >= a) & (freqs < b) for a, b in _BANDS]
+    levels, feats, rest = [], [], b""
+    chunk = sr * 2 * 600                       # 10 minutes à la fois (mémoire maîtrisée)
+    while True:
+        data = proc.stdout.read(chunk)
+        if not data:
+            break
+        data = rest + data
+        usable = len(data) // (sr * 2) * (sr * 2)
+        rest = data[usable:]
+        x = np.frombuffer(data[:usable], dtype=np.int16).astype(np.float32) / 32768.0
+        if x.size == 0:
+            continue
+        sec = x.reshape(-1, sr)
+        levels += (20 * np.log10(np.sqrt((sec ** 2).mean(axis=1)) + 1e-9)).clip(-90, 0).round(1).tolist()
+        spec = np.abs(np.fft.rfft(x.reshape(-1, hop), axis=1)) ** 2
+        feats.append(np.stack([np.log10(spec[:, m].sum(axis=1) + 1e-9) for m in masks], axis=1))
+    proc.wait()
+    feats = np.concatenate(feats) if feats else np.zeros((0, len(_BANDS)), dtype=np.float32)
+    return levels, feats.astype(np.float32)
+
+
+def vod_analysis(cfg, vod_id, vod_url):
+    """Analyse d'une rediffusion (volume + empreinte), gardée en cache."""
+    import numpy as np
+    cache = resolve(cfg.get("work_dir", "work")) / "vodcache"
+    lv, ft = cache / f"{vod_id}.json", cache / f"{vod_id}.npy"
+    if lv.exists() and ft.exists():
+        return json.loads(lv.read_text()), np.load(ft)
     log.info("Analyse du son de la rediffusion %s (quelques minutes la première fois)…", vod_id)
     with yt_dlp.YoutubeDL({**ydl_base_opts(cfg), "format": "Audio_Only/audio_only/bestaudio/worst"}) as y:
         info = y.extract_info(vod_url, download=False)
     stream = info.get("url") or info["requested_formats"][0]["url"]
-    levels = loudness_per_second(stream)
-    cache.parent.mkdir(parents=True, exist_ok=True)
-    cache.write_text(json.dumps(levels))
-    return levels
+    levels, feats = analyze_audio(stream)
+    cache.mkdir(parents=True, exist_ok=True)
+    lv.write_text(json.dumps(levels))
+    np.save(ft, feats.astype(np.float16))
+    return levels, feats
+
+
+def vod_loudness(cfg, vod_id, vod_url):
+    return vod_analysis(cfg, vod_id, vod_url)[0]
+
+
+def locate_in_vod(clip_feats, vod_feats):
+    """Retrouve où un extrait (Short d'un clipper) se situe dans un live, par corrélation des empreintes.
+    Renvoie (seconde de début, score 0-1) ou (None, score) si la correspondance n'est pas fiable."""
+    import numpy as np
+    L, N = len(clip_feats), len(vod_feats)
+    if L < FEAT_RATE * 5 or N < L:
+        return None, 0.0
+    total = np.zeros(N - L + 1)
+    size = 1 << int(np.ceil(np.log2(N + L)))
+    for b in range(clip_feats.shape[1]):
+        c = clip_feats[:, b].astype(np.float64)
+        c = (c - c.mean()) / (c.std() + 1e-9)
+        v = vod_feats[:, b].astype(np.float64)
+        cs, cs2 = np.concatenate([[0], np.cumsum(v)]), np.concatenate([[0], np.cumsum(v * v)])
+        mean = (cs[L:] - cs[:-L]) / L
+        std = np.sqrt(np.maximum((cs2[L:] - cs2[:-L]) / L - mean ** 2, 1e-9))
+        corr = np.fft.irfft(np.fft.rfft(v, size) * np.conj(np.fft.rfft(c, size)), size)[:N - L + 1]
+        total += corr / (L * std)
+    total /= clip_feats.shape[1]
+    k = int(np.argmax(total))
+    best = float(total[k])
+    other = np.concatenate([total[:max(0, k - L)], total[k + L:]])
+    second = float(other.max()) if other.size else 0.0
+    if best >= 0.5 and best - second >= 0.12:
+        return k // FEAT_RATE, round(best, 3)
+    return None, round(best, 3)
+
+
+def clipper_moments(cfg, vods_by_id, scan=True):
+    """Shorts récents des chaînes de clippers YouTube -> moments retrouvés dans les lives.
+    Renvoie {vod_id: [(seconde, durée, vues)]}. Résultats gardés en cache (un Short n'est analysé qu'une fois)."""
+    ccfg = (cfg.get("sources") or {}).get("clippers") or {}
+    if not ccfg.get("enabled") or not ccfg.get("channels") or not vods_by_id:
+        return {}
+    cache_file = resolve(cfg.get("work_dir", "work")) / "clippercache.json"
+    cache = json.loads(cache_file.read_text()) if cache_file.exists() else {}
+    found = {}
+    for entry in cache.values():
+        if entry.get("vod") in vods_by_id:
+            found.setdefault(entry["vod"], []).append((entry["offset"], entry["duration"], entry.get("views", 0)))
+    if not scan:
+        return found
+    max_age = timedelta(hours=ccfg.get("lookback_hours", 72))
+    now = datetime.now(timezone.utc)
+    work = resolve(cfg.get("work_dir", "work")) / "clippers"
+    work.mkdir(parents=True, exist_ok=True)
+    for url in ccfg["channels"]:
+        url = url.rstrip("/")
+        if "/shorts" not in url and "/videos" not in url:
+            url += "/shorts"
+        try:
+            with yt_dlp.YoutubeDL({**ydl_base_opts(cfg), "extract_flat": True,
+                                   "playlistend": int(ccfg.get("per_channel", 10))}) as y:
+                listing = y.extract_info(url, download=False)
+        except Exception as e:
+            log.warning("Clippers : %s illisible (%s)", url, e)
+            continue
+        for e in listing.get("entries") or []:
+            sid = e.get("id")
+            if not sid or sid in cache:
+                continue
+            try:
+                with yt_dlp.YoutubeDL({**ydl_base_opts(cfg), "format": "bestaudio/best",
+                                       "outtmpl": str(work / f"{sid}.%(ext)s")}) as y:
+                    info = y.extract_info(f"https://www.youtube.com/watch?v={sid}", download=False)
+                    ts = info.get("timestamp")
+                    if ts and now - datetime.fromtimestamp(ts, timezone.utc) > max_age:
+                        cache[sid] = {"vod": None}
+                        continue
+                    y.process_info(info)
+                files = list(work.glob(f"{sid}.*"))
+                if not files:
+                    continue
+                _, clip_feats = analyze_audio(str(files[0]))
+                best = {"vod": None, "score": 0.0}
+                for vid, vod in vods_by_id.items():
+                    vod_created = datetime.fromisoformat(vod["created_at"].replace("Z", "+00:00"))
+                    if ts and datetime.fromtimestamp(ts, timezone.utc) < vod_created:
+                        continue          # le Short est plus ancien que ce live
+                    offset, score = locate_in_vod(clip_feats, vod["feats"])
+                    if offset is not None and score > best["score"]:
+                        best = {"vod": vid, "offset": int(offset), "score": score,
+                                "duration": int(info.get("duration") or 30), "views": info.get("view_count") or 0,
+                                "from": f"https://www.youtube.com/watch?v={sid}"}
+                cache[sid] = best
+                if best["vod"]:
+                    log.info("Clipper : « %s » retrouvé dans le live %s à %ds (score %.2f)",
+                             info.get("title", sid), best["vod"], best["offset"], best["score"])
+                    found.setdefault(best["vod"], []).append((best["offset"], best["duration"], best["views"]))
+            except Exception as ex:
+                log.warning("Clippers : Short %s ignoré (%s)", sid, ex)
+            finally:
+                for f in work.glob(f"{sid}.*"):
+                    f.unlink(missing_ok=True)
+    cache_file.write_text(json.dumps(cache))
+    return found
 
 
 def pick_highlights(levels, length, count, blocked=(), min_gap=120, boosts=(), step=5, min_excess=3.0):
@@ -302,13 +442,18 @@ def pick_highlights(levels, length, count, blocked=(), min_gap=120, boosts=(), s
 
 
 def vod_candidates(cfg, tw, login, clips, state, scan=True):
+    """Extraits pris dans les rediffusions, par deux techniques (en plus des clips Twitch) :
+    1) les moments repris par des chaînes de clippers YouTube, retrouvés dans le live ;
+    2) les pics de son et les passages clippés par les viewers."""
     src = cfg["sources"]["twitch"]
     vcfg = src.get("vods") or {}
     length = int(cfg["video"]["max_duration"])
     keywords = [k.lower() for k in vcfg.get("title_keywords") or [] if k]
     max_age = timedelta(hours=vcfg.get("lookback_hours", 72))
     now = datetime.now(timezone.utc)
-    out = []
+    work = resolve(cfg.get("work_dir", "work"))
+
+    vods = {}
     for v in tw.videos(login, first=int(vcfg.get("max_vods", 2))):
         created = datetime.fromisoformat(v["created_at"].replace("Z", "+00:00"))
         if now - created > max_age:
@@ -316,33 +461,48 @@ def vod_candidates(cfg, tw, login, clips, state, scan=True):
         if keywords and not any(k in v["title"].lower() for k in keywords):
             log.debug("Rediffusion ignorée (titre) : %s", v["title"])
             continue
-        cached = (resolve(cfg.get("work_dir", "work")) / "vodcache" / f"{v['id']}.json").exists()
+        cached = (work / "vodcache" / f"{v['id']}.json").exists() and (work / "vodcache" / f"{v['id']}.npy").exists()
         if not scan and not cached:
             continue
-        levels = vod_loudness(cfg, v["id"], v["url"])
-        # Passages déjà publiés : extraits de cette rediffusion + clips Twitch publiés de ce live
+        levels, feats = vod_analysis(cfg, v["id"], v["url"])
+        vods[v["id"]] = {**v, "levels": levels, "feats": feats}
+
+    moments = clipper_moments(cfg, vods, scan)
+    out = []
+    for vid, v in vods.items():
+        # Passages déjà publiés : extraits de ce live + clips Twitch publiés de ce live
         blocked = []
         if state is not None:
             for sid, st in state.db.execute(
-                    "SELECT source_id, status FROM clips WHERE source_id LIKE ?", (f"vod:{v['id']}:%",)):
+                    "SELECT source_id, status FROM clips WHERE source_id LIKE ?", (f"vod:{vid}:%",)):
                 if st == "done":
                     start = int(sid.rsplit(":", 1)[1])
                     blocked.append((start, start + length))
         boosts = []
         for cl in clips:
-            if cl.get("video_id") == v["id"] and cl.get("vod_offset") is not None:
+            if cl.get("video_id") == vid and cl.get("vod_offset") is not None:
                 boosts.append(cl["vod_offset"])
                 row = state.get("tw:" + cl["id"]) if state is not None else None
                 if row and row["status"] == "done":
                     blocked.append((cl["vod_offset"], cl["vod_offset"] + int(cl["duration"])))
-        for start, end in pick_highlights(levels, length, int(vcfg.get("highlights_per_vod", 6)),
+
+        def add(start, end, views):
+            out.append({"source_id": f"vod:{vid}:{start}", "platform": "twitch-vod",
+                        "channel": v["user_name"], "title": v["title"], "url": v["url"],
+                        "views": views, "credit_url": f"https://twitch.tv/{login}",
+                        "start": start, "end": end})
+
+        # 1) Moments repris par les clippers (prioritaires : déjà validés par le public)
+        for offset, dur, views in sorted(moments.get(vid, []), key=lambda m: -m[2]):
+            end = offset + min(max(dur, 10), length)
+            if any(a < end and offset < b for a, b in blocked):
+                continue
+            add(offset, end, max(int(views), 1))
+            blocked.append((offset, end))
+        # 2) Pics de son + passages clippés par les viewers
+        for start, end in pick_highlights(v["levels"], length, int(vcfg.get("highlights_per_vod", 6)),
                                           blocked, int(vcfg.get("min_gap_seconds", 120)), boosts):
-            out.append({
-                "source_id": f"vod:{v['id']}:{start}", "platform": "twitch-vod",
-                "channel": v["user_name"], "title": v["title"], "url": v["url"],
-                "views": 0, "credit_url": f"https://twitch.tv/{login}",
-                "start": start, "end": end,
-            })
+            add(start, end, 0)
     return out
 
 

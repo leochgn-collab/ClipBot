@@ -36,6 +36,9 @@ Mot de passe : `runuser -u clipbot -- /opt/clipbot/venv/bin/python /opt/clipbot/
 ## Fonctionnement
 
 1. **Twitch** : clips les plus vus des dernières 48 h (API officielle Helix).
+   **Rediffusions Twitch** : plusieurs moments forts par live, trouvés de trois façons :
+   passages repris par des **chaînes de clippers YouTube** (retrouvés dans le live par le son, prioritaires),
+   passages clippés par les viewers, et pics de son. Un passage déjà publié n'est jamais repris.
    **YouTube** : moments les plus revus des vidéos récentes (heatmap « Most replayed »).
 2. Téléchargement avec yt-dlp (seulement l'extrait utile pour YouTube).
 3. Montage ffmpeg 1080×1920, 30 i/s, ≤ 59 s, sous-titres auto (faster-whisper).
