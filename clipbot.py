@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import random
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -163,19 +164,32 @@ class Twitch:
             log.warning("Jeux introuvables sur Twitch (vérifie l'orthographe) : %s", ", ".join(missing))
         return ids
 
+    def user_id(self, login):
+        if not hasattr(self, "_uids"):
+            self._uids = {}
+        if login not in self._uids:
+            users = self._get("/users", login=login)
+            self._uids[login] = users[0]["id"] if users else None
+        return self._uids[login]
+
+    def videos(self, login, first=3):
+        """Rediffusions (VOD) récentes de la chaîne."""
+        uid = self.user_id(login)
+        return self._get("/videos", user_id=uid, type="archive", first=first) if uid else []
+
     def clips(self, login, since, until):
-        users = self._get("/users", login=login)
-        if not users:
+        uid = self.user_id(login)
+        if not uid:
             log.warning("Twitch : chaîne introuvable '%s'", login)
             return []
         return self._get(
-            "/clips", broadcaster_id=users[0]["id"], first=50,
+            "/clips", broadcaster_id=uid, first=50,
             started_at=since.strftime("%Y-%m-%dT%H:%M:%SZ"),
             ended_at=until.strftime("%Y-%m-%dT%H:%M:%SZ"),
         )
 
 
-def twitch_candidates(cfg):
+def twitch_candidates(cfg, state=None, scan_vods=True):
     src = cfg["sources"].get("twitch") or {}
     if not src.get("enabled"):
         return []
@@ -197,6 +211,12 @@ def twitch_candidates(cfg):
         except requests.RequestException as e:
             log.error("Twitch %s : %s", login, e)
             continue
+        vods = src.get("vods") or {}
+        if vods.get("enabled"):
+            try:
+                out += vod_candidates(cfg, tw, login, clips, state, scan_vods)
+            except Exception as e:  # une rediffusion illisible ne bloque pas les clips
+                log.error("Rediffusions de %s : %s", login, e)
         for cl in clips:
             if cl["view_count"] < min_views or cl["duration"] > max_d + 5:
                 continue
@@ -211,6 +231,118 @@ def twitch_candidates(cfg):
                 "start": None, "end": None,
             })
     log.info("Twitch : %d clip(s) candidat(s)", len(out))
+    return out
+
+
+# --------------------------------------------------------------------------
+# Sources : rediffusions Twitch (moments forts détectés au son)
+# --------------------------------------------------------------------------
+def _twitch_duration(text):
+    """« 4h3m10s » -> secondes."""
+    return sum(int(n) * {"h": 3600, "m": 60, "s": 1}[u] for n, u in re.findall(r"(\d+)([hms])", text or ""))
+
+
+def loudness_per_second(stream):
+    """Volume sonore (dB) seconde par seconde, calculé par ffmpeg sans tout télécharger sur le disque."""
+    cmd = ["ffmpeg", "-nostats", "-loglevel", "error", "-i", stream, "-vn", "-ac", "1",
+           "-af", "aresample=8000,asetnsamples=n=8000:p=0,astats=metadata=1:reset=1,"
+                  "ametadata=print:key=lavfi.astats.Overall.RMS_level:file=-",
+           "-f", "null", "-"]
+    out = subprocess.run(cmd, capture_output=True, text=True, check=True).stdout
+    levels = []
+    for line in out.splitlines():
+        if "RMS_level=" in line:
+            v = line.split("=", 1)[1].strip()
+            levels.append(-90.0 if v in ("-inf", "inf", "nan") else max(-90.0, float(v)))
+    return levels
+
+
+def vod_loudness(cfg, vod_id, vod_url):
+    """Analyse d'une rediffusion, gardée en cache (elle ne change plus une fois le live fini)."""
+    cache = resolve(cfg.get("work_dir", "work")) / "vodcache" / f"{vod_id}.json"
+    if cache.exists():
+        return json.loads(cache.read_text())
+    log.info("Analyse du son de la rediffusion %s (quelques minutes la première fois)…", vod_id)
+    with yt_dlp.YoutubeDL({**ydl_base_opts(cfg), "format": "Audio_Only/audio_only/bestaudio/worst"}) as y:
+        info = y.extract_info(vod_url, download=False)
+    stream = info.get("url") or info["requested_formats"][0]["url"]
+    levels = loudness_per_second(stream)
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps(levels))
+    return levels
+
+
+def pick_highlights(levels, length, count, blocked=(), min_gap=120, boosts=(), step=5, min_excess=3.0):
+    """Les `count` passages de `length` s les plus « forts » (son au-dessus du niveau habituel du live),
+    sans chevaucher les passages déjà pris (`blocked`) ni être à moins de `min_gap` s l'un de l'autre.
+    `boosts` : instants où les viewers ont créé des clips (bonus)."""
+    n = len(levels)
+    if n < length:
+        return []
+    med = sorted(levels)[n // 2]
+    score = [max(0.0, v - med) for v in levels]
+    for b in boosts:
+        for t in range(max(0, int(b)), min(n, int(b) + 30)):
+            score[t] += 8.0
+    pref = [0.0]
+    for v in score:
+        pref.append(pref[-1] + v)
+    taken = [(max(0, a - min_gap), b + min_gap) for a, b in blocked]
+    picks = []
+    windows = sorted(((pref[t + length] - pref[t], t) for t in range(0, n - length, step)), reverse=True)
+    for total, t in windows:
+        # en moyenne au moins `min_excess` dB au-dessus du niveau habituel (sinon : passage calme)
+        if len(picks) >= count or total < min_excess * length:
+            break
+        if any(a < t + length and t < b for a, b in taken):
+            continue
+        picks.append((t, t + length))
+        taken.append((t - min_gap, t + length + min_gap))
+    return sorted(picks)
+
+
+def vod_candidates(cfg, tw, login, clips, state, scan=True):
+    src = cfg["sources"]["twitch"]
+    vcfg = src.get("vods") or {}
+    length = int(cfg["video"]["max_duration"])
+    keywords = [k.lower() for k in vcfg.get("title_keywords") or [] if k]
+    max_age = timedelta(hours=vcfg.get("lookback_hours", 72))
+    now = datetime.now(timezone.utc)
+    out = []
+    for v in tw.videos(login, first=int(vcfg.get("max_vods", 2))):
+        created = datetime.fromisoformat(v["created_at"].replace("Z", "+00:00"))
+        if now - created > max_age:
+            continue
+        if keywords and not any(k in v["title"].lower() for k in keywords):
+            log.debug("Rediffusion ignorée (titre) : %s", v["title"])
+            continue
+        cached = (resolve(cfg.get("work_dir", "work")) / "vodcache" / f"{v['id']}.json").exists()
+        if not scan and not cached:
+            continue
+        levels = vod_loudness(cfg, v["id"], v["url"])
+        # Passages déjà publiés : extraits de cette rediffusion + clips Twitch publiés de ce live
+        blocked = []
+        if state is not None:
+            for sid, st in state.db.execute(
+                    "SELECT source_id, status FROM clips WHERE source_id LIKE ?", (f"vod:{v['id']}:%",)):
+                if st == "done":
+                    start = int(sid.rsplit(":", 1)[1])
+                    blocked.append((start, start + length))
+        boosts = []
+        for cl in clips:
+            if cl.get("video_id") == v["id"] and cl.get("vod_offset") is not None:
+                boosts.append(cl["vod_offset"])
+                row = state.get("tw:" + cl["id"]) if state is not None else None
+                if row and row["status"] == "done":
+                    blocked.append((cl["vod_offset"], cl["vod_offset"] + int(cl["duration"])))
+        for start, end in pick_highlights(levels, length, int(vcfg.get("highlights_per_vod", 6)),
+                                          blocked, int(vcfg.get("min_gap_seconds", 120)), boosts):
+            out.append({
+                "source_id": f"vod:{v['id']}:{start}", "platform": "twitch-vod",
+                "channel": v["user_name"], "title": v["title"], "url": v["url"],
+                "views": 0, "credit_url": f"https://twitch.tv/{login}",
+                "start": start, "end": end,
+            })
     return out
 
 
@@ -667,7 +799,7 @@ def run(cfg, dry_run=False, only=None, force=False):
                 log.info("Prochain clip dans %d min.", wait.total_seconds() // 60 + 1)
                 return
 
-    candidates = twitch_candidates(cfg) + youtube_candidates(cfg)
+    candidates = twitch_candidates(cfg, state) + youtube_candidates(cfg)
     seen = set()  # un même clip ne doit être traité qu'une fois par passage
     if only:
         # « Publier maintenant » : ce clip-là seulement, sauf s'il est déjà publié

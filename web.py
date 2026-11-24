@@ -481,7 +481,7 @@ def home():
 HISTORY_TABLE = """{% if rows %}<table><tr><th>Date</th><th>Chaîne</th><th>Titre</th><th>Statut</th><th>Liens</th><th></th></tr>
 {% for r in rows %}<tr>
 <td class="mut">{{(r.updated or '')[:16].replace('T',' ')}}</td>
-<td>{{r.channel}}<div class="mut" style="font-size:12px">{{r.platform}}</div></td>
+<td>{{r.channel}}<div class="mut" style="font-size:12px">{{ 'live (moment fort)' if r.platform == 'twitch-vod' else r.platform }}</div></td>
 <td>{{r.title}}{% if r.error %}<div class="err">{{r.error}}</div>{% endif %}</td>
 <td><span class="b {{r.status or 'new'}}">{{ {'done':'publié','error':'erreur'}.get(r.status, 'en cours') }}</span>{% if r.tries %}<div class="mut" style="font-size:12px">{{r.tries}} essai(s)</div>{% endif %}</td>
 <td>{% if r.youtube_id and r.youtube_id!='navigateur' %}<a href="https://youtube.com/shorts/{{r.youtube_id}}" target="_blank">YouTube</a>{% elif r.youtube_id %}YouTube ✓{% endif %}
@@ -535,7 +535,9 @@ def available():
     error, clips = None, []
     try:
         import clipbot
-        clips = clipbot.twitch_candidates(cfg)
+        st = clipbot.State(resolve(cfg.get("state_db", "clipbot.db")))
+        # scan_vods=False : seules les rediffusions déjà analysées (sinon la page mettrait des minutes)
+        clips = clipbot.twitch_candidates(cfg, st, scan_vods=False)
     except Exception as e:  # clés Twitch absentes, réseau…
         error = str(e)[:300]
     con = db()
@@ -672,6 +674,12 @@ def settings():
         lg["width"] = max(80, min(num("logo_width", 220), 600))
         tw["lookback_hours"] = min(num("lookback", 48), 168)
         tw["games"] = [g.strip() for g in f.get("games", "").split(",") if g.strip()]
+        vd = tw.setdefault("vods", {})
+        vd["enabled"] = "vods_on" in f
+        vd["highlights_per_vod"] = max(1, min(int(f.get("vods_per") or 6), 30))
+        vd["max_vods"] = max(1, min(int(f.get("vods_max") or 2), 10))
+        vd["min_gap_seconds"] = max(30, min(int(f.get("vods_gap") or 120), 3600))
+        vd["title_keywords"] = [k.strip() for k in f.get("vods_kw", "").split(",") if k.strip()]
         meta["fallback_title"] = f.get("fallback_title", "").strip() or "Moment fou en live"
         tw["min_views"] = num("min_views", 0)
         if f.get("tw_id"):
@@ -756,6 +764,15 @@ def settings():
 <div><label>Vues minimum par défaut</label><input type="number" name="min_views" value="{{tw.min_views or 0}}"></div></div>
 <label>Jeux autorisés (noms Twitch séparés par des virgules, vide = tous)</label>
 <input name="games" value="{{ (tw.games or [])|join(', ') }}" placeholder="Grand Theft Auto V, Grand Theft Auto VI"></div>
+
+<div class="card"><h2 style="margin-top:0">Moments forts des lives (rediffusions)</h2>
+<p class="mut" style="font-size:13px">En plus des clips des viewers, ClipBot analyse les rediffusions : il repère les pics de son (cris, rires…) et les passages déjà clippés par les viewers, sans jamais reprendre un passage publié.</p>
+<label><input type="checkbox" name="vods_on" style="width:auto" {{'checked' if (tw.vods or {}).enabled}}> Activer</label>
+<div class="row"><div><label>Extraits max par live</label><input type="number" name="vods_per" min="1" max="30" value="{{(tw.vods or {}).highlights_per_vod or 6}}"></div>
+<div><label>Lives regardés par chaîne</label><input type="number" name="vods_max" min="1" max="10" value="{{(tw.vods or {}).max_vods or 2}}"></div>
+<div><label>Écart entre 2 extraits (s)</label><input type="number" name="vods_gap" min="30" value="{{(tw.vods or {}).min_gap_seconds or 120}}"></div></div>
+<label>Seulement les lives dont le titre contient (virgules, vide = tous)</label>
+<input name="vods_kw" value="{{ ((tw.vods or {}).title_keywords or [])|join(', ') }}" placeholder="GTA"></div>
 
 <div class="card"><h2 style="margin-top:0">Publication</h2>
 {% for p,n in [('youtube','YouTube Shorts'),('tiktok','TikTok')] %}<div class="row" style="margin-bottom:8px">

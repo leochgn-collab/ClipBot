@@ -10,6 +10,14 @@ sources:
     min_views: 200                 # seuil par défaut
     # Ne garder que les clips joués sur ces jeux (noms exacts Twitch). Vide = tous les jeux.
     games: ["Grand Theft Auto VI"]
+    # Moments forts des rediffusions (lives entiers) : son + passages clippés par les viewers
+    vods:
+      enabled: true
+      max_vods: 2                  # rediffusions récentes regardées par chaîne
+      lookback_hours: 72           # rediffusions de moins de 72 h
+      highlights_per_vod: 6        # extraits max par rediffusion
+      min_gap_seconds: 120         # écart minimum entre deux extraits du même live
+      title_keywords: ["GTA"]      # seulement les lives dont le titre contient un de ces mots (vide = tous)
     channels:
       - login: nom_du_streamer     # pseudo Twitch (dans l'URL de la chaîne)
         min_views: 500             # seuil propre à cette chaîne (optionnel)
