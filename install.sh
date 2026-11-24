@@ -13,7 +13,7 @@ fi
 
 id clipbot >/dev/null 2>&1 || useradd --system --home "$DIR" --shell /usr/sbin/nologin clipbot
 mkdir -p "$DIR/secrets"
-cp clipbot.py browser_upload.py web.py run-request.sh auth_youtube.py auth_tiktok.py requirements.txt config.example.yaml "$DIR"/
+cp clipbot.py analyse.py browser_upload.py web.py run-request.sh auth_youtube.py auth_tiktok.py requirements.txt config.example.yaml "$DIR"/
 mkdir -p "$DIR"/{assets,trigger}
 [ -f "$DIR/config.yaml" ] || cp "$DIR/config.example.yaml" "$DIR/config.yaml"
 

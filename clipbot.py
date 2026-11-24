@@ -203,6 +203,10 @@ def twitch_candidates(cfg, state=None, scan_vods=True):
     if allowed_games is not None:
         log.info("Filtre jeux : %s", ", ".join(allowed_games.values()) or "aucun jeu reconnu")
     out = []
+    per_channel, all_vods = [], {}
+    vods_on = (src.get("vods") or {}).get("enabled")
+    if vods_on and scan_vods:
+        clean_vodcache(cfg)
     for ch in src.get("channels", []):
         login = ch["login"] if isinstance(ch, dict) else ch
         min_views = (ch.get("min_views") if isinstance(ch, dict) else None) or src.get("min_views", 0)
@@ -211,12 +215,28 @@ def twitch_candidates(cfg, state=None, scan_vods=True):
         except requests.RequestException as e:
             log.error("Twitch %s : %s", login, e)
             continue
-        vods = src.get("vods") or {}
-        if vods.get("enabled"):
+        vods = {}
+        if vods_on:
             try:
-                out += vod_candidates(cfg, tw, login, clips, state, scan_vods)
+                vods = collect_vods(cfg, tw, login, scan_vods)
             except Exception as e:  # une rediffusion illisible ne bloque pas les clips
                 log.error("Rediffusions de %s : %s", login, e)
+        all_vods.update(vods)
+        per_channel.append((login, min_views, clips, vods))
+    # Les comptes de clippers sont comparés à TOUS les lives (Michou, Squeezie, Inoxtag…) en une fois
+    moments = {}
+    if all_vods:
+        try:
+            moments = clipper_moments(cfg, all_vods, scan_vods)
+        except Exception as e:
+            log.error("Clippers : %s", e)
+    model = load_model(cfg) if all_vods else None
+    for login, min_views, clips, vods in per_channel:
+        if vods:
+            try:
+                out += vod_candidates(cfg, login, vods, clips, state, moments, model, scan_vods)
+            except Exception as e:
+                log.error("Moments forts de %s : %s", login, e)
         for cl in clips:
             if cl["view_count"] < min_views or cl["duration"] > max_d + 5:
                 continue
@@ -242,109 +262,50 @@ def _twitch_duration(text):
     return sum(int(n) * {"h": 3600, "m": 60, "s": 1}[u] for n, u in re.findall(r"(\d+)([hms])", text or ""))
 
 
-def loudness_per_second(stream):
-    """Volume sonore (dB) seconde par seconde, calculé par ffmpeg sans tout télécharger sur le disque."""
-    cmd = ["ffmpeg", "-nostats", "-loglevel", "error", "-i", stream, "-vn", "-ac", "1",
-           "-af", "aresample=8000,asetnsamples=n=8000:p=0,astats=metadata=1:reset=1,"
-                  "ametadata=print:key=lavfi.astats.Overall.RMS_level:file=-",
-           "-f", "null", "-"]
-    out = subprocess.run(cmd, capture_output=True, text=True, check=True).stdout
-    levels = []
-    for line in out.splitlines():
-        if "RMS_level=" in line:
-            v = line.split("=", 1)[1].strip()
-            levels.append(-90.0 if v in ("-inf", "inf", "nan") else max(-90.0, float(v)))
-    return levels
-
-
-FEAT_RATE = 20          # images d'empreinte par seconde (50 ms)
-_BANDS = ((60, 250), (250, 600), (600, 1200), (1200, 1990))
-
-
-def analyze_audio(source):
-    """Lit un son (fichier ou flux) en une passe et renvoie :
-    - levels : volume (dB) seconde par seconde, pour repérer les pics ;
-    - feats  : empreinte sonore 20 fois/s sur 4 bandes, pour retrouver un extrait dans un live."""
-    import numpy as np
-    sr, hop = 4000, 200
-    proc = subprocess.Popen(["ffmpeg", "-nostats", "-loglevel", "error", "-i", source, "-vn", "-ac", "1",
-                             "-ar", str(sr), "-f", "s16le", "-"], stdout=subprocess.PIPE)
-    freqs = np.fft.rfftfreq(hop, 1 / sr)
-    masks = [(freqs >= a) & (freqs < b) for a, b in _BANDS]
-    levels, feats, rest = [], [], b""
-    chunk = sr * 2 * 600                       # 10 minutes à la fois (mémoire maîtrisée)
-    while True:
-        data = proc.stdout.read(chunk)
-        if not data:
-            break
-        data = rest + data
-        usable = len(data) // (sr * 2) * (sr * 2)
-        rest = data[usable:]
-        x = np.frombuffer(data[:usable], dtype=np.int16).astype(np.float32) / 32768.0
-        if x.size == 0:
-            continue
-        sec = x.reshape(-1, sr)
-        levels += (20 * np.log10(np.sqrt((sec ** 2).mean(axis=1)) + 1e-9)).clip(-90, 0).round(1).tolist()
-        spec = np.abs(np.fft.rfft(x.reshape(-1, hop), axis=1)) ** 2
-        feats.append(np.stack([np.log10(spec[:, m].sum(axis=1) + 1e-9) for m in masks], axis=1))
-    proc.wait()
-    feats = np.concatenate(feats) if feats else np.zeros((0, len(_BANDS)), dtype=np.float32)
-    return levels, feats.astype(np.float32)
-
-
 def vod_analysis(cfg, vod_id, vod_url):
-    """Analyse d'une rediffusion (volume + empreinte), gardée en cache."""
+    """Analyse du son d'une rediffusion (volume + empreinte), gardée en cache."""
     import numpy as np
+    import analyse
     cache = resolve(cfg.get("work_dir", "work")) / "vodcache"
-    lv, ft = cache / f"{vod_id}.json", cache / f"{vod_id}.npy"
+    lv, ft = cache / f"{vod_id}.json", cache / f"{vod_id}.s60.npy"
     if lv.exists() and ft.exists():
-        return json.loads(lv.read_text()), np.load(ft)
+        return json.loads(lv.read_text()), np.load(ft).astype(np.float32)
     log.info("Analyse du son de la rediffusion %s (quelques minutes la première fois)…", vod_id)
     with yt_dlp.YoutubeDL({**ydl_base_opts(cfg), "format": "Audio_Only/audio_only/bestaudio/worst"}) as y:
         info = y.extract_info(vod_url, download=False)
     stream = info.get("url") or info["requested_formats"][0]["url"]
-    levels, feats = analyze_audio(stream)
+    levels, feats = analyse.features(stream)
     cache.mkdir(parents=True, exist_ok=True)
     lv.write_text(json.dumps(levels))
     np.save(ft, feats.astype(np.float16))
     return levels, feats
 
 
-def vod_loudness(cfg, vod_id, vod_url):
-    return vod_analysis(cfg, vod_id, vod_url)[0]
+def clean_vodcache(cfg, keep_days=10):
+    """Supprime les analyses de lives trop vieux (les exemples d'apprentissage, eux, sont gardés)."""
+    cache = resolve(cfg.get("work_dir", "work")) / "vodcache"
+    if not cache.exists():
+        return
+    limit = time.time() - keep_days * 86400
+    for f in cache.iterdir():
+        old_format = f.suffix == ".npy" and not f.name.endswith(".s60.npy")
+        if old_format or (not f.name.endswith(".train.npz") and f.stat().st_mtime < limit):
+            f.unlink(missing_ok=True)
 
 
-def locate_in_vod(clip_feats, vod_feats):
-    """Retrouve où un extrait (Short d'un clipper) se situe dans un live, par corrélation des empreintes.
-    Renvoie (seconde de début, score 0-1) ou (None, score) si la correspondance n'est pas fiable."""
-    import numpy as np
-    L, N = len(clip_feats), len(vod_feats)
-    if L < FEAT_RATE * 5 or N < L:
-        return None, 0.0
-    total = np.zeros(N - L + 1)
-    size = 1 << int(np.ceil(np.log2(N + L)))
-    for b in range(clip_feats.shape[1]):
-        c = clip_feats[:, b].astype(np.float64)
-        c = (c - c.mean()) / (c.std() + 1e-9)
-        v = vod_feats[:, b].astype(np.float64)
-        cs, cs2 = np.concatenate([[0], np.cumsum(v)]), np.concatenate([[0], np.cumsum(v * v)])
-        mean = (cs[L:] - cs[:-L]) / L
-        std = np.sqrt(np.maximum((cs2[L:] - cs2[:-L]) / L - mean ** 2, 1e-9))
-        corr = np.fft.irfft(np.fft.rfft(v, size) * np.conj(np.fft.rfft(c, size)), size)[:N - L + 1]
-        total += corr / (L * std)
-    total /= clip_feats.shape[1]
-    k = int(np.argmax(total))
-    best = float(total[k])
-    other = np.concatenate([total[:max(0, k - L)], total[k + L:]])
-    second = float(other.max()) if other.size else 0.0
-    if best >= 0.5 and best - second >= 0.12:
-        return k // FEAT_RATE, round(best, 3)
-    return None, round(best, 3)
+def _clipper_url(url):
+    url = url.strip().rstrip("/")
+    if "tiktok.com" in url:
+        return url
+    if "/shorts" not in url and "/videos" not in url:
+        url += "/shorts"
+    return url
 
 
 def clipper_moments(cfg, vods_by_id, scan=True):
-    """Shorts récents des chaînes de clippers YouTube -> moments retrouvés dans les lives.
-    Renvoie {vod_id: [(seconde, durée, vues)]}. Résultats gardés en cache (un Short n'est analysé qu'une fois)."""
+    """Shorts / TikTok récents des comptes de clippers -> moments retrouvés dans les lives.
+    Renvoie {vod_id: [(seconde, durée, vues)]}. Chaque vidéo n'est analysée qu'une fois (cache)."""
+    import analyse
     ccfg = (cfg.get("sources") or {}).get("clippers") or {}
     if not ccfg.get("enabled") or not ccfg.get("channels") or not vods_by_id:
         return {}
@@ -360,10 +321,47 @@ def clipper_moments(cfg, vods_by_id, scan=True):
     now = datetime.now(timezone.utc)
     work = resolve(cfg.get("work_dir", "work")) / "clippers"
     work.mkdir(parents=True, exist_ok=True)
+    import numpy as np
+    index = {vid: analyse.VodIndex(v["feats"]) for vid, v in vods_by_id.items()}
+    created = {vid: datetime.fromisoformat(v["created_at"].replace("Z", "+00:00")) for vid, v in vods_by_id.items()}
+    fdir = resolve(cfg.get("work_dir", "work")) / "clipperfeats"
+    fdir.mkdir(parents=True, exist_ok=True)
+    stats = [0, 0]
+
+    def eligible(ts):
+        return {vid: ix for vid, ix in index.items()
+                if not ts or datetime.fromtimestamp(ts, timezone.utc) >= created[vid]}
+
+    def record(sid, entry, res, clip_len, ts, checked):
+        if res:
+            stats[0] += 1
+            dur = int(clip_len * res["rate"])
+            entry.update(vod=res["vod"], offset=res["start"], duration=min(dur, 90), score=res["score"],
+                         rate=res["rate"])
+            entry.pop("checked", None)
+            (fdir / f"{sid}.npy").unlink(missing_ok=True)
+            log.info("Clipper : « %s » retrouvé dans le live %s à %ds (vitesse ×%s, score %.2f)",
+                     entry.get("title", sid)[:60], res["vod"], res["start"], res["rate"], res["score"])
+            found.setdefault(res["vod"], []).append((res["start"], entry["duration"], entry.get("views", 0)))
+        else:
+            entry["checked"] = sorted(set(entry.get("checked", [])) | set(checked))
+        cache[sid] = entry
+
+    # Vidéos déjà vues mais pas retrouvées : on réessaie seulement sur les lives nouvellement analysés
+    for sid, entry in list(cache.items()):
+        if entry.get("vod") or entry.get("old") or not (fdir / f"{sid}.npy").exists():
+            continue
+        ts = entry.get("ts")
+        if ts and now - datetime.fromtimestamp(ts, timezone.utc) > max_age:
+            entry["old"] = True
+            (fdir / f"{sid}.npy").unlink(missing_ok=True)
+            continue
+        new = {vid: ix for vid, ix in eligible(ts).items() if vid not in entry.get("checked", [])}
+        if new:
+            clip_feats = np.load(fdir / f"{sid}.npy").astype(np.float32)
+            record(sid, entry, analyse.locate(clip_feats, new), entry.get("len", 30), ts, new)
     for url in ccfg["channels"]:
-        url = url.rstrip("/")
-        if "/shorts" not in url and "/videos" not in url:
-            url += "/shorts"
+        url = _clipper_url(url)
         try:
             with yt_dlp.YoutubeDL({**ydl_base_opts(cfg), "extract_flat": True,
                                    "playlistend": int(ccfg.get("per_channel", 10))}) as y:
@@ -372,44 +370,110 @@ def clipper_moments(cfg, vods_by_id, scan=True):
             log.warning("Clippers : %s illisible (%s)", url, e)
             continue
         for e in listing.get("entries") or []:
+            vid_url = e.get("url") or e.get("webpage_url")
             sid = e.get("id")
             if not sid or sid in cache:
                 continue
+            if not vid_url or not vid_url.startswith("http"):
+                vid_url = f"https://www.youtube.com/watch?v={sid}"
             try:
                 with yt_dlp.YoutubeDL({**ydl_base_opts(cfg), "format": "bestaudio/best",
                                        "outtmpl": str(work / f"{sid}.%(ext)s")}) as y:
-                    info = y.extract_info(f"https://www.youtube.com/watch?v={sid}", download=False)
+                    info = y.extract_info(vid_url, download=False)
                     ts = info.get("timestamp")
                     if ts and now - datetime.fromtimestamp(ts, timezone.utc) > max_age:
-                        cache[sid] = {"vod": None}
+                        cache[sid] = {"vod": None, "old": True}
                         continue
                     y.process_info(info)
                 files = list(work.glob(f"{sid}.*"))
                 if not files:
                     continue
-                _, clip_feats = analyze_audio(str(files[0]))
-                best = {"vod": None, "score": 0.0}
-                for vid, vod in vods_by_id.items():
-                    vod_created = datetime.fromisoformat(vod["created_at"].replace("Z", "+00:00"))
-                    if ts and datetime.fromtimestamp(ts, timezone.utc) < vod_created:
-                        continue          # le Short est plus ancien que ce live
-                    offset, score = locate_in_vod(clip_feats, vod["feats"])
-                    if offset is not None and score > best["score"]:
-                        best = {"vod": vid, "offset": int(offset), "score": score,
-                                "duration": int(info.get("duration") or 30), "views": info.get("view_count") or 0,
-                                "from": f"https://www.youtube.com/watch?v={sid}"}
-                cache[sid] = best
-                if best["vod"]:
-                    log.info("Clipper : « %s » retrouvé dans le live %s à %ds (score %.2f)",
-                             info.get("title", sid), best["vod"], best["offset"], best["score"])
-                    found.setdefault(best["vod"], []).append((best["offset"], best["duration"], best["views"]))
+                _, clip_feats = analyse.features(str(files[0]))
+                cands = eligible(ts)          # seulement les lives commencés avant la vidéo
+                res = analyse.locate(clip_feats, cands) if cands else None
+                stats[1] += 1
+                clip_len = info.get("duration") or len(clip_feats) / analyse.FPS
+                entry = {"vod": None, "title": info.get("title", ""), "from": vid_url, "ts": ts,
+                         "len": clip_len, "views": info.get("view_count") or 0}
+                if not res:   # gardée (70 Ko) pour réessayer quand d'autres lives seront analysés
+                    np.save(fdir / f"{sid}.npy", clip_feats.astype(np.float16))
+                record(sid, entry, res, clip_len, ts, cands)
             except Exception as ex:
-                log.warning("Clippers : Short %s ignoré (%s)", sid, ex)
+                log.warning("Clippers : vidéo %s ignorée (%s)", sid, ex)
             finally:
                 for f in work.glob(f"{sid}.*"):
                     f.unlink(missing_ok=True)
+    if stats[1]:
+        log.info("Clippers : %d vidéo(s) analysée(s), %d retrouvée(s) dans les lives", stats[1], stats[0])
     cache_file.write_text(json.dumps(cache))
     return found
+
+
+# --------------------------------------------------------------------------
+# Apprentissage des moments forts
+# --------------------------------------------------------------------------
+MODEL_MIN_EXAMPLES = 12
+
+
+def model_file(cfg):
+    return resolve(cfg.get("work_dir", "work")) / "highlight_model.json"
+
+
+def load_model(cfg):
+    f = model_file(cfg)
+    if not f.exists():
+        return None
+    m = json.loads(f.read_text())
+    return m if m.get("n_pos", 0) >= MODEL_MIN_EXAMPLES else None
+
+
+def update_training(cfg, vid, P, positives, length):
+    """Range les exemples de ce live (passages clippés = moments forts) et réentraîne le modèle si besoin."""
+    import numpy as np
+    import analyse
+    cache = resolve(cfg.get("work_dir", "work")) / "vodcache"
+    f = cache / f"{vid}.train.npz"
+    pos = sorted({(int(a), int(b)) for a, b in positives})
+    if f.exists():
+        old = np.load(f)
+        if sorted(map(tuple, old["pos"].tolist())) == pos:
+            return
+    if not pos:
+        return
+    X, y = analyse.training_rows(P, pos, length)
+    if not len(X):
+        return
+    np.savez(f, X=X.astype(np.float32), y=y.astype(np.int8), pos=np.array(pos))
+    Xs, ys, n_pos, n_lives = [], [], 0, 0
+    for g in cache.glob("*.train.npz"):
+        d = np.load(g)
+        Xs.append(d["X"]); ys.append(d["y"]); n_pos += len(d["pos"]); n_lives += 1
+    model = analyse.train(np.vstack(Xs), np.concatenate(ys))
+    model.update(n_pos=n_pos, n_lives=n_lives, date=datetime.now(timezone.utc).isoformat(timespec="minutes"),
+                 names=[f"{n} (moy.)" for n in analyse.NAMES] + [f"{n} (max)" for n in analyse.NAMES])
+    model_file(cfg).write_text(json.dumps(model))
+    log.info("Moments forts : modèle réentraîné (%d passages clippés, %d live(s))%s", n_pos, n_lives,
+             "" if n_pos >= MODEL_MIN_EXAMPLES else f" — utilisé à partir de {MODEL_MIN_EXAMPLES}")
+
+
+def pick_with_model(model, P, length, count, blocked=(), min_gap=120, boosts=(), min_score=0.5):
+    import analyse
+    starts, sc = analyse.scores(model, P, length)
+    sc = sc.copy()
+    for k, s in enumerate(starts):
+        if any(s - 15 <= b <= s + length for b in boosts):
+            sc[k] += 0.2
+    taken = [(max(0, a - min_gap), b + min_gap) for a, b in blocked]
+    picks = []
+    for k in sc.argsort()[::-1]:
+        if len(picks) >= count or sc[k] < min_score:
+            break
+        t = starts[k]
+        if any(a < t + length and t < b for a, b in taken):
+            continue
+        picks.append((t, t + length))
+        taken.append((t - min_gap, t + length + min_gap))
+    return sorted(picks)
 
 
 def pick_highlights(levels, length, count, blocked=(), min_gap=120, boosts=(), step=5, min_excess=3.0):
@@ -441,18 +505,13 @@ def pick_highlights(levels, length, count, blocked=(), min_gap=120, boosts=(), s
     return sorted(picks)
 
 
-def vod_candidates(cfg, tw, login, clips, state, scan=True):
-    """Extraits pris dans les rediffusions, par deux techniques (en plus des clips Twitch) :
-    1) les moments repris par des chaînes de clippers YouTube, retrouvés dans le live ;
-    2) les pics de son et les passages clippés par les viewers."""
-    src = cfg["sources"]["twitch"]
-    vcfg = src.get("vods") or {}
-    length = int(cfg["video"]["max_duration"])
+def collect_vods(cfg, tw, login, scan=True):
+    """Rediffusions récentes d'une chaîne, analysées (son + empreinte)."""
+    vcfg = cfg["sources"]["twitch"].get("vods") or {}
     keywords = [k.lower() for k in vcfg.get("title_keywords") or [] if k]
     max_age = timedelta(hours=vcfg.get("lookback_hours", 72))
     now = datetime.now(timezone.utc)
     work = resolve(cfg.get("work_dir", "work"))
-
     vods = {}
     for v in tw.videos(login, first=int(vcfg.get("max_vods", 2))):
         created = datetime.fromisoformat(v["created_at"].replace("Z", "+00:00"))
@@ -461,13 +520,23 @@ def vod_candidates(cfg, tw, login, clips, state, scan=True):
         if keywords and not any(k in v["title"].lower() for k in keywords):
             log.debug("Rediffusion ignorée (titre) : %s", v["title"])
             continue
-        cached = (work / "vodcache" / f"{v['id']}.json").exists() and (work / "vodcache" / f"{v['id']}.npy").exists()
-        if not scan and not cached:
+        if not scan and not (work / "vodcache" / f"{v['id']}.s60.npy").exists():
             continue
-        levels, feats = vod_analysis(cfg, v["id"], v["url"])
-        vods[v["id"]] = {**v, "levels": levels, "feats": feats}
+        try:
+            levels, feats = vod_analysis(cfg, v["id"], v["url"])
+        except Exception as e:
+            log.error("Rediffusion %s illisible : %s", v["id"], e)
+            continue
+        vods[v["id"]] = {**v, "levels": levels, "feats": feats, "login": login}
+    return vods
 
-    moments = clipper_moments(cfg, vods, scan)
+
+def vod_candidates(cfg, login, vods, clips, state, moments, model, scan=True):
+    """Extraits pris dans les rediffusions d'une chaîne, en plus des clips Twitch :
+    1) les moments repris par les comptes de clippers (YouTube/TikTok), retrouvés dans le live ;
+    2) les moments forts (modèle appris, ou pics de son), autour des passages clippés par les viewers."""
+    vcfg = cfg["sources"]["twitch"].get("vods") or {}
+    length = int(cfg["video"]["max_duration"])
     out = []
     for vid, v in vods.items():
         # Passages déjà publiés : extraits de ce live + clips Twitch publiés de ce live
@@ -499,9 +568,24 @@ def vod_candidates(cfg, tw, login, clips, state, scan=True):
                 continue
             add(offset, end, max(int(views), 1))
             blocked.append((offset, end))
-        # 2) Pics de son + passages clippés par les viewers
-        for start, end in pick_highlights(v["levels"], length, int(vcfg.get("highlights_per_vod", 6)),
-                                          blocked, int(vcfg.get("min_gap_seconds", 120)), boosts):
+        # Exemples pour l'apprentissage : passages repris par les clippers et par les viewers
+        import analyse
+        P = analyse.per_second(v["levels"], v["feats"])
+        positives = [(o, o + max(d, 10)) for o, d, _ in moments.get(vid, [])]
+        positives += [(cl["vod_offset"], cl["vod_offset"] + int(cl["duration"]))
+                      for cl in clips if cl.get("video_id") == vid and cl.get("vod_offset") is not None]
+        if scan and len(P):
+            try:
+                update_training(cfg, vid, P, positives, length)
+            except Exception as e:
+                log.warning("Apprentissage ignoré pour %s : %s", vid, e)
+        # 2) Moments forts : modèle appris si assez d'exemples, sinon pics de son
+        count, gap = int(vcfg.get("highlights_per_vod", 6)), int(vcfg.get("min_gap_seconds", 120))
+        if model and len(P):
+            picks = pick_with_model(model, P, length, count, blocked, gap, boosts)
+        else:
+            picks = pick_highlights(v["levels"], length, count, blocked, gap, boosts)
+        for start, end in picks:
             add(start, end, 0)
     return out
 

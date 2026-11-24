@@ -197,6 +197,21 @@ def start_job(mode):
     tmp.rename(trig / "request")
 
 
+def model_info(cfg):
+    try:
+        import clipbot
+        f = clipbot.model_file(cfg)
+        if not f.exists():
+            return "Apprentissage : pas encore d'exemples (au volume sonore pour l'instant)."
+        m = json.loads(f.read_text())
+        n, need = m.get("n_pos", 0), clipbot.MODEL_MIN_EXAMPLES
+        if n < need:
+            return f"Apprentissage en cours : {n}/{need} passages clippés vus (au volume sonore pour l'instant)."
+        return f"Modèle appris actif : {n} passages clippés sur {m.get('n_lives', 0)} live(s), mis à jour le {m.get('date', '')[:10]}."
+    except Exception:
+        return "Apprentissage : état illisible."
+
+
 def tail(path, n=200):
     if not path.exists():
         return ""
@@ -689,7 +704,8 @@ def settings():
             u = u.strip()
             if u.startswith("@"):
                 u = "https://www.youtube.com/" + u
-            if re.fullmatch(r"https://(www\.|m\.)?youtube\.com/(@[\w.\-]+|channel/[\w\-]+|c/[\w.\-]+)(/shorts|/videos)?/?", u):
+            if re.fullmatch(r"https://(www\.|m\.)?youtube\.com/(@[\w.\-]+|channel/[\w\-]+|c/[\w.\-]+)(/shorts|/videos)?/?", u) \
+                    or re.fullmatch(r"https://(www\.)?tiktok\.com/@[\w.\-]+/?", u):
                 urls.append(u)
         cl["channels"] = urls[:30]
         meta["fallback_title"] = f.get("fallback_title", "").strip() or "Moment fou en live"
@@ -778,7 +794,8 @@ def settings():
 <input name="games" value="{{ (tw.games or [])|join(', ') }}" placeholder="Grand Theft Auto V, Grand Theft Auto VI"></div>
 
 <div class="card"><h2 style="margin-top:0">Moments forts des lives (rediffusions)</h2>
-<p class="mut" style="font-size:13px">En plus des clips des viewers, ClipBot analyse les rediffusions : il repère les pics de son (cris, rires…) et les passages déjà clippés par les viewers, sans jamais reprendre un passage publié.</p>
+<p class="mut" style="font-size:13px">En plus des clips des viewers, ClipBot analyse les rediffusions et repère les moments forts, sans jamais reprendre un passage publié. Il apprend tout seul à les reconnaître à partir des passages déjà clippés par les viewers et les clippers (volume, cris, rires, rythme de la voix…).</p>
+<p style="font-size:13px">🧠 {{ model_info }}</p>
 <label><input type="checkbox" name="vods_on" style="width:auto" {{'checked' if (tw.vods or {}).enabled}}> Activer</label>
 <div class="row"><div><label>Extraits max par live</label><input type="number" name="vods_per" min="1" max="30" value="{{(tw.vods or {}).highlights_per_vod or 6}}"></div>
 <div><label>Lives regardés par chaîne</label><input type="number" name="vods_max" min="1" max="10" value="{{(tw.vods or {}).max_vods or 2}}"></div>
@@ -786,12 +803,12 @@ def settings():
 <label>Seulement les lives dont le titre contient (virgules, vide = tous)</label>
 <input name="vods_kw" value="{{ ((tw.vods or {}).title_keywords or [])|join(', ') }}" placeholder="GTA"></div>
 
-<div class="card"><h2 style="margin-top:0">Chaînes de clippers YouTube</h2>
-<p class="mut" style="font-size:13px">ClipBot regarde les Shorts récents de ces chaînes, retrouve par le son le passage du live qu'ils ont clippé, et refait ce moment fort depuis le live d'origine (avec ton design). Ces moments passent en priorité, avant les pics de son. Nécessite « Moments forts des lives » activé.</p>
+<div class="card"><h2 style="margin-top:0">Comptes de clippers (YouTube et TikTok)</h2>
+<p class="mut" style="font-size:13px">ClipBot regarde les vidéos récentes de ces comptes, retrouve par le son le passage du live qu'ils ont clippé (même accéléré, avec musique ou coupé), et refait ce moment depuis le live d'origine avec ton design. Ces moments passent en priorité. Ils servent aussi d'exemples pour apprendre à repérer les moments forts. Nécessite « Moments forts des lives » activé.</p>
 {% set cl = cfg.sources.clippers or {} %}
 <label><input type="checkbox" name="cl_on" style="width:auto" {{'checked' if cl.enabled}}> Activer</label>
-<label>Chaînes (une par ligne : lien ou @pseudo)</label>
-<textarea name="cl_channels" rows="4" placeholder="https://www.youtube.com/@NomDuClipper">{{ (cl.channels or [])|join('\n') }}</textarea>
+<label>Comptes (un par ligne : lien YouTube, lien TikTok ou @pseudo YouTube)</label>
+<textarea name="cl_channels" rows="4" placeholder="https://www.youtube.com/@NomDuClipper&#10;https://www.tiktok.com/@nomduclipper">{{ (cl.channels or [])|join('\n') }}</textarea>
 <div class="row"><div><label>Shorts récents de moins de (heures)</label><input type="number" name="cl_lookback" min="6" max="336" value="{{cl.lookback_hours or 72}}"></div>
 <div><label>Shorts regardés par chaîne</label><input type="number" name="cl_per" min="1" max="50" value="{{cl.per_channel or 10}}"></div></div></div>
 
@@ -853,6 +870,7 @@ def settings():
 <button class="sec">Changer le mot de passe</button></form>
 <p class="mut" style="font-size:13px">Accès réservé à : {{ (cfg.web or {}).allowed_ips|join(', ') if (cfg.web or {}).allowed_ips else 'tout le monde' }} · double authentification : {{ 'activée' if totp_on else 'désactivée' }}.</p></div>""",
                 cfg=cfg, v=v, tw=tw, pub=pub, meta=meta, ntfy=ntfy, logo_ok=logo_path().exists(),
+                model_info=model_info(cfg),
                 totp_on=TOTP_FILE.exists())
 
 

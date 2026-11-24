@@ -19,7 +19,7 @@ if [ -d "$SRC/.git" ]; then
 fi
 
 echo "→ Copie des fichiers…"
-cp "$SRC"/{clipbot.py,web.py,browser_upload.py,run-request.sh,auth_youtube.py,auth_tiktok.py,requirements.txt,config.example.yaml,README.md} "$DIR"/
+cp "$SRC"/{clipbot.py,analyse.py,web.py,browser_upload.py,run-request.sh,auth_youtube.py,auth_tiktok.py,requirements.txt,config.example.yaml,README.md} "$DIR"/
 cp "$SRC"/systemd/*.service "$SRC"/systemd/*.timer "$SRC"/systemd/*.path /etc/systemd/system/
 mkdir -p "$DIR"/{assets/fonts,trigger,logs,screenshots,preview,work,secrets}
 

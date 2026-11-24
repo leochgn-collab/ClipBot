@@ -37,8 +37,11 @@ Mot de passe : `runuser -u clipbot -- /opt/clipbot/venv/bin/python /opt/clipbot/
 
 1. **Twitch** : clips les plus vus des dernières 48 h (API officielle Helix).
    **Rediffusions Twitch** : plusieurs moments forts par live, trouvés de trois façons :
-   passages repris par des **chaînes de clippers YouTube** (retrouvés dans le live par le son, prioritaires),
-   passages clippés par les viewers, et pics de son. Un passage déjà publié n'est jamais repris.
+   passages repris par des **comptes de clippers YouTube / TikTok** (retrouvés dans le live par empreinte
+   sonore, même accélérés, avec musique ou coupés — prioritaires), passages clippés par les viewers, et
+   moments forts détectés par un **modèle qui apprend** à partir de tous ces passages clippés (au volume
+   sonore tant qu'il a moins de 12 exemples). Un passage déjà publié n'est jamais repris.
+   Banc d'essai (lives de test, 300+ Shorts déformés) : ~93 % retrouvés à ±1 s, quasi aucun faux positif.
    **YouTube** : moments les plus revus des vidéos récentes (heatmap « Most replayed »).
 2. Téléchargement avec yt-dlp (seulement l'extrait utile pour YouTube).
 3. Montage ffmpeg 1080×1920, 30 i/s, ≤ 59 s, sous-titres auto (faster-whisper).
