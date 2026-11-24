@@ -1,0 +1,116 @@
+# ClipBot – copie ce fichier en config.yaml puis remplis-le.
+# ⚠️ Ne liste QUE des créateurs qui t'ont donné leur autorisation.
+
+sources:
+  twitch:
+    enabled: true
+    client_id: "xxxxxxxx"          # https://dev.twitch.tv/console/apps
+    client_secret: "xxxxxxxx"
+    lookback_hours: 48             # clips créés sur les 48 dernières heures (max 168)
+    min_views: 200                 # seuil par défaut
+    # Ne garder que les clips joués sur ces jeux (noms exacts Twitch). Vide = tous les jeux.
+    games: ["Grand Theft Auto VI"]
+    channels:
+      - login: nom_du_streamer     # pseudo Twitch (dans l'URL de la chaîne)
+        min_views: 500             # seuil propre à cette chaîne (optionnel)
+      - login: autre_streamer
+
+  youtube:
+    enabled: false
+    lookback_hours: 72             # vidéos publiées il y a moins de 72 h…
+    min_age_hours: 12              # …et plus de 12 h (le temps que la heatmap existe)
+    videos_per_channel: 5
+    clips_per_video: 1             # nombre d'extraits pris dans chaque vidéo
+    channels:
+      - url: https://www.youtube.com/@NomDeLaChaine/videos   # ou /streams pour les lives
+        name: NomDeLaChaine
+
+video:
+  max_duration: 59                 # secondes
+  layout: bandeau                  # bandeau = design A ; flou = ancien fond flou
+  bandeau:
+    line1: "ABONNEZ-VOUS"
+    line2: "ET LIKEZ !"
+    footer: "REDIFSTREAM"
+  logo:                            # ton logo incrusté (envoie-le depuis l'interface : Réglages)
+    enabled: false
+    file: assets/logo.png
+    position: top                  # top = en haut, bottom = en bas
+    width: 220
+  crf: 21
+  subtitles:
+    enabled: true                  # nécessite faster-whisper
+    model: small                   # tiny / base / small / medium (plus gros = plus lent)
+    language: fr
+    words_per_line: 4
+
+metadata:
+  # Variables : {title} {channel} {url} {credit_url}
+  fallback_title: "Moment fou en live"   # remplace les titres de clip trop courts (« x »)
+  title: "{title} 😳 | {channel}"
+  description: |
+    🎬 Clip de {channel} (publié avec son autorisation)
+    👉 Sa chaîne : {credit_url}
+    Source : {url}
+
+    #shorts #gta #gtarp
+  tiktok_caption: "{title} – 🎬 {channel} #gta #gtarp #clip"
+  tags: [gta, gta rp, clip, shorts]
+
+publish:
+  youtube:
+    enabled: true
+    method: browser                # browser = via le navigateur | api = API officielle
+    token_file: secrets/youtube_token.json   # créé par auth_youtube.py
+    privacy: public                # public / unlisted / private
+    category_id: 20                # 20 = Jeux vidéo
+  tiktok:
+    enabled: true
+    method: browser                # browser = via le navigateur | api = API officielle
+    # --- réglages du mode api uniquement ---
+    client_key: "xxxxxxxx"         # https://developers.tiktok.com
+    client_secret: "xxxxxxxx"
+    redirect_uri: "https://ton-domaine.fr/tiktok-callback"   # doit être déclarée dans l'appli TikTok
+    token_file: secrets/tiktok_token.json    # créé par auth_tiktok.py
+    # inbox  = envoie la vidéo en brouillon dans l'appli TikTok (fonctionne sans audit)
+    # direct = publie directement (en privé tant que ton appli n'a pas passé l'audit TikTok)
+    mode: inbox
+    privacy_level: PUBLIC_TO_EVERYONE
+
+  # Mode navigateur : ClipBot publie depuis TikTok Studio / YouTube Studio avec TON compte.
+  # Exporte tes cookies depuis Chrome sur ton PC (extension « Get cookies.txt LOCALLY »),
+  # une fois connecté à tiktok.com et à youtube.com, puis copie-les dans secrets/.
+  browser:
+    tiktok_cookies: secrets/tiktok_cookies.txt
+    youtube_cookies: secrets/youtube_cookies.txt
+    profile_dir: secrets/browser-profile   # garde la session entre deux passages
+    headless: false                # false + xvfb-run (service systemd) = moins détecté
+    timeout_s: 60
+    # selectors:                   # à modifier seulement si TikTok/YouTube changent leur site
+    #   tiktok:
+    #     post_button: "button[data-e2e='post_video_button']"
+
+ntfy:
+  url: https://ntfy.example.fr     # ton serveur ntfy
+  topic: clipbot
+  token: ""                        # jeton d'accès ntfy (tk_…) si ton serveur en demande un
+
+# Rythme : ClipBot vérifie toutes les 15 min et publie quand l'intervalle est écoulé
+schedule:
+  interval_minutes: 60             # 1 clip toutes les 60 min (45 possible)
+  start_hour: 11                   # heures d'activité (heure de Paris)
+  end_hour: 22
+rotation: true                     # alterne entre les créateurs
+max_posts_per_run: 1
+max_posts_per_day: 12
+max_tries: 3                       # abandonne un clip après 3 échecs
+state_db: clipbot.db
+work_dir: work
+ytdlp_cookies: ""                  # cookies.txt si YouTube bloque les téléchargements
+
+# Interface web (web.py)
+web:
+  # IP de ton CT Zoraxy : seul lui a le droit d'indiquer l'IP réelle du visiteur
+  trusted_proxies: []                # IP de ton reverse proxy (Zoraxy…) si tu en mets un devant
+  # Qui peut ouvrir l'interface (vide = tout le monde). Ex. : Zoraxy + ton réseau local
+  allowed_ips: ["192.168.1.0/24"]

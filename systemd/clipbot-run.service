@@ -1,0 +1,19 @@
+[Unit]
+Description=ClipBot - passage demandé depuis l interface web
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=clipbot
+WorkingDirectory=/opt/clipbot
+ExecStart=/bin/bash /opt/clipbot/run-request.sh
+TimeoutStartSec=2h
+Nice=10
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/clipbot/ms-playwright
+UMask=0077
+# Durcissement (Chromium a besoin du reste)
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+RestrictSUIDSGID=yes

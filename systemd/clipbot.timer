@@ -1,0 +1,11 @@
+[Unit]
+Description=ClipBot - vérifie toutes les 15 minutes s'il est temps de publier
+
+[Timer]
+# Le rythme réel (45 min, 1 h…) et les heures d'activité se règlent dans l'interface
+OnCalendar=*:0/15
+RandomizedDelaySec=60
+Persistent=false
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,9 @@
+[Unit]
+Description=ClipBot - lancement demandé depuis l'interface web
+
+[Path]
+PathExists=/opt/clipbot/trigger/request
+Unit=clipbot-run.service
+
+[Install]
+WantedBy=multi-user.target

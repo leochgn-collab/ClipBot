@@ -1,0 +1,19 @@
+[Unit]
+Description=ClipBot - publication automatique de clips
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=clipbot
+WorkingDirectory=/opt/clipbot
+ExecStart=/usr/bin/xvfb-run -a /opt/clipbot/venv/bin/python /opt/clipbot/clipbot.py -c /opt/clipbot/config.yaml
+TimeoutStartSec=2h
+Nice=10
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/clipbot/ms-playwright
+UMask=0077
+# Durcissement (Chromium a besoin du reste)
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+RestrictSUIDSGID=yes

@@ -1,0 +1,24 @@
+[Unit]
+Description=ClipBot - interface web
+After=network-online.target
+
+[Service]
+User=clipbot
+WorkingDirectory=/opt/clipbot
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/clipbot/ms-playwright
+ExecStart=/opt/clipbot/venv/bin/python /opt/clipbot/web.py --port 8080
+Restart=on-failure
+UMask=0077
+# Durcissement
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/clipbot
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target
