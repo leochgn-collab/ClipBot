@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import os
 import re
 import struct
 import secrets
@@ -346,13 +347,13 @@ pre{background:#0a0c10;border:1px solid var(--line);border-radius:8px;padding:12
 }
 </style></head><body>
 {% if session.ok %}<nav><b>🎬 ClipBot</b>
-{% for p,l in [('home','Tableau de bord'),('available','Clips disponibles'),('history','Historique'),('channels','Chaînes'),('settings','Réglages'),('cookies','Cookies'),('media','Captures'),('logs','Logs')] %}
+{% for p,l in [('home','Tableau de bord'),('available','Clips disponibles'),('history','Historique'),('stats','Statistiques'),('channels','Chaînes'),('settings','Réglages'),('cookies','Cookies'),('media','Captures'),('logs','Logs')] %}
 <a href="{{url_for(p)}}" class="{{'on' if request.endpoint==p}}">{{l}}</a>{% endfor %}
 <form class="r" method="post" action="{{url_for('logout')}}" style="margin-left:auto"><input type="hidden" name="csrf" value="{{csrf_token()}}"><button class="sec sm">Déconnexion</button></form></nav>{% endif %}
 <main>{% for m in get_flashed_messages() %}<div class="flash">{{m}}</div>{% endfor %}
 {{ body|safe }}</main>
 {% if session.ok %}<nav class="tabbar" aria-label="Menu">
-{% set more = request.endpoint in ('menu','channels','cookies','media','logs') %}
+{% set more = request.endpoint in ('menu','stats','channels','cookies','media','logs') %}
 <a href="{{url_for('home')}}" class="{{'on' if request.endpoint=='home'}}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></svg>Accueil</a>
 <a href="{{url_for('available')}}" class="{{'on' if request.endpoint=='available'}}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M10 9l5 3-5 3z"/></svg>Clips</a>
 <a href="{{url_for('history')}}" class="{{'on' if request.endpoint=='history'}}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>Historique</a>
@@ -418,6 +419,7 @@ def login():
 def menu():
     return page("""<h1>Plus</h1>
 <div class="card" style="display:flex;flex-direction:column;gap:10px">
+<a class="btn sec" href="{{url_for('stats')}}">📈 Statistiques (ce qui marche)</a>
 <a class="btn sec" href="{{url_for('channels')}}">Chaînes autorisées</a>
 <a class="btn sec" href="{{url_for('cookies')}}">Cookies</a>
 <a class="btn sec" href="{{url_for('media')}}">Captures et aperçus</a>
@@ -486,8 +488,20 @@ def home():
 <div class="card stat"><div class="n" style="font-size:16px;margin-top:8px">{{'⏸ en pause' if cfg.paused else ('🟢 actif' if active=='active' else '⚪ ' ~ active)}}</div><div class="l">automatique · prochain clip : {{nxt}} · actif {{(cfg.schedule or {}).start_hour or 0}}h-{{(cfg.schedule or {}).end_hour or 24}}h</div></div>
 </div>
 <div class="card"><div class="row" style="flex:none">
-{% if running %}<span>⏳ Un passage est en cours…</span>
+{% if running %}<div style="flex:1 1 100%">
+<div><b id="st-step">⏳ {{ st.step if st else 'Un passage est en cours…' }}</b> <span class="mut" id="st-time"></span></div>
+<div class="mut" id="st-detail" style="font-size:13px">{{ st.detail if st else '' }}</div></div>
+<form method="post" action="{{url_for('stop')}}"><input type="hidden" name="csrf" value="{{csrf_token()}}"><button class="ko">⏹ Arrêter</button></form>
 <a class="btn sec" href="{{url_for('logs')}}">Voir le suivi</a>
+<script>
+const t0={{ (st.started if st else 0)|tojson }};
+function tick(){fetch("{{url_for('status')}}",{credentials:"same-origin"}).then(r=>r.json()).then(d=>{
+ if(!d.running){location.reload();return}
+ if(d.step){document.getElementById("st-step").textContent="⏳ "+d.step;document.getElementById("st-detail").textContent=d.detail||""}
+ const s=Math.round(Date.now()/1000-(d.started||t0)); if(s>0&&s<86400) document.getElementById("st-time").textContent="· depuis "+(s>=60?Math.floor(s/60)+" min ":"")+(s%60)+" s";
+}).catch(()=>{})}
+tick();setInterval(tick,3000);
+</script>
 {% else %}
 <form method="post" action="{{url_for('run')}}"><input type="hidden" name="csrf" value="{{csrf_token()}}"><input type="hidden" name="mode" value="normal"><button>▶ Lancer maintenant</button></form>
 <form method="post" action="{{url_for('run')}}"><input type="hidden" name="csrf" value="{{csrf_token()}}"><input type="hidden" name="mode" value="dry"><button class="sec">🧪 Essai sans publier</button></form>
@@ -498,7 +512,7 @@ def home():
 </div>{% if cfg.paused %}<p class="err" style="margin:10px 0 0">⏸ En pause : aucune publication automatique. Les essais et « Publier maintenant » marchent toujours.</p>{% endif %}</div>
 <h2>Dernière activité</h2><div class="card">{% include_body %}</div>""".replace(
         "{% include_body %}", HISTORY_TABLE), s=stats, cfg=cfg, rows=last,
-        running=job_running(), active=active, nxt=nxt)
+        running=job_running(), active=active, nxt=nxt, st=read_status())
 
 
 HISTORY_TABLE = """{% if rows %}<table><tr><th>Date</th><th>Chaîne</th><th>Titre</th><th>Statut</th><th>Liens</th><th></th></tr>
@@ -537,6 +551,87 @@ def run():
         start_job(mode if mode in ("dry", "check") else "normal")
         flash("Lancé ! Suis l'avancement dans « Logs ».")
     return redirect(url_for("logs"))
+
+
+def read_status():
+    try:
+        return json.loads((BASE / "work" / "status.json").read_text())
+    except (OSError, ValueError):
+        return None
+
+
+@app.route("/status")
+@login_required
+def status():
+    st = read_status() or {}
+    return app.response_class(json.dumps({"running": job_running(), "step": st.get("step"),
+                                          "detail": st.get("detail"), "started": st.get("started")}),
+                              mimetype="application/json")
+
+
+@app.route("/stop", methods=["POST"])
+@login_required
+def stop():
+    """Arrête le passage en cours (et ses téléchargements, montage, navigateur)."""
+    import signal
+    if not job_running():
+        flash("Aucun passage en cours.")
+        return redirect(url_for("home"))
+    try:
+        pid = int((BASE / "clipbot.lock").read_text().strip() or 0)
+    except (OSError, ValueError):
+        pid = 0
+    if pid <= 1:
+        flash("Impossible de trouver le passage en cours (redémarre-le après la mise à jour).")
+        return redirect(url_for("home"))
+    try:
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            os.kill(pid, signal.SIGTERM)
+        flash("⏹ Arrêt demandé : le passage s'arrête dans quelques secondes. Tu peux relancer ensuite.")
+    except (ProcessLookupError, PermissionError) as e:
+        flash(f"Arrêt impossible : {e}")
+    return redirect(url_for("home"))
+
+
+@app.route("/stats")
+@login_required
+def stats():
+    cfg = load_cfg()
+    try:
+        data = json.loads((resolve(cfg.get("work_dir", "work")) / "performances.json").read_text())
+    except (OSError, ValueError):
+        data = {}
+    return page("""<h1>Statistiques</h1>
+<p class="mut">ClipBot relève les vues et les likes de tes Shorts (toutes les 6 h, à chaque passage) et en déduit
+ce qui marche. Les Shorts de moins de 24 h ne comptent pas encore. Ce qui marche le mieux passe en priorité.</p>
+{% if not d.n %}<div class="card"><p class="mut">Pas encore assez de données : il faut des Shorts publiés depuis plus de 24 h.
+Elles arrivent au prochain passage.</p></div>{% else %}
+<p class="mut" style="font-size:13px">{{d.n}} Short(s) analysé(s) · mis à jour {{ upd }}.
+« Effet » : au-dessus de 0 = fait mieux que tes Shorts habituels.</p>
+{% for title, rows in d.tables.items() %}<h2>{{title}}</h2><div class="card"><table>
+<tr><th>{{title}}</th><th>Shorts</th><th>Vues moy.</th><th>Likes moy.</th><th>Effet</th></tr>
+{% for r in rows %}<tr><td>{{r.name}}</td><td>{{r.n}}</td><td>{{r.views}}</td><td>{{r.likes}}</td>
+<td style="color:{{'var(--ok)' if r.effect > 0.05 else ('var(--ko)' if r.effect < -0.05 else 'inherit')}}">{{ '%+.2f'|format(r.effect) }}</td></tr>{% endfor %}
+</table></div>{% endfor %}
+<h2>Tes meilleurs Shorts</h2><div class="card"><table><tr><th>Titre</th><th>Streamer</th><th>Vues</th><th>Likes</th></tr>
+{% for t in d.top %}<tr><td><a href="https://youtube.com/shorts/{{t.id}}" target="_blank" rel="noopener">{{t.title}}</a></td><td>{{t.streamer}}</td><td>{{t.views}}</td><td>{{t.likes}}</td></tr>{% endfor %}
+</table></div>{% endif %}""", d=data, upd=datetime.fromtimestamp(data.get("t", 0)).strftime("%d/%m %H:%M") if data.get("t") else "")
+
+
+@app.route("/ntfy-test", methods=["POST"])
+@login_required
+def ntfy_test():
+    import clipbot
+    cfg = load_cfg()
+    n = cfg.get("ntfy") or {}
+    if not n.get("url") or not n.get("topic"):
+        flash("Remplis d'abord l'URL et le topic ntfy, puis Enregistrer.")
+    else:
+        clipbot.notify(cfg, "🔔 ClipBot : test", "Les notifications ClipBot arrivent bien ici.", 3, ["bell"])
+        flash(f"Notification de test envoyée sur « {n['topic']} ».")
+    return redirect(url_for("settings"))
 
 
 @app.route("/pause", methods=["POST"])
@@ -883,7 +978,9 @@ def settings():
 <div class="card"><h2 style="margin-top:0">Notifications ntfy</h2><div class="row">
 <div><label>URL du serveur</label><input name="ntfy_url" value="{{ntfy.url or ''}}"></div>
 <div><label>Topic</label><input name="ntfy_topic" value="{{ntfy.topic or ''}}"></div>
-<div><label>Jeton {{'(déjà rempli)' if ntfy.token}}</label><input name="ntfy_token" type="password" placeholder="laisser vide pour ne pas changer"></div></div></div>
+<div><label>Jeton {{'(déjà rempli)' if ntfy.token}}</label><input name="ntfy_token" type="password" placeholder="laisser vide pour ne pas changer"></div></div>
+<p class="mut" style="font-size:13px">Une notification à chaque vidéo publiée (touche-la pour ouvrir le Short) et à chaque erreur.</p>
+<button class="sec sm" formaction="{{url_for('ntfy_test')}}" formmethod="post">🔔 Envoyer une notification de test</button></div>
 <button>Enregistrer</button></form>
 <div class="card" style="margin-top:16px"><h2 style="margin-top:0">Envoyer mon logo (PNG ou JPG, 2 Mo max)</h2>
 <form method="post" action="{{url_for('logo_upload')}}" enctype="multipart/form-data"><input type="hidden" name="csrf" value="{{csrf_token()}}">

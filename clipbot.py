@@ -58,6 +58,10 @@ class State:
                 title TEXT, status TEXT, youtube_id TEXT, tiktok_id TEXT,
                 tries INTEGER DEFAULT 0, error TEXT, updated TEXT)"""
         )
+        try:
+            self.db.execute("ALTER TABLE clips ADD COLUMN kind TEXT")   # type de passage (stats)
+        except sqlite3.OperationalError:
+            pass
         self.db.commit()
 
     def get(self, sid):
@@ -71,9 +75,9 @@ class State:
     def save(self, c, **fields):
         now = datetime.now(timezone.utc).isoformat()
         self.db.execute(
-            """INSERT INTO clips (source_id, platform, channel, title, updated)
-               VALUES (?,?,?,?,?) ON CONFLICT(source_id) DO NOTHING""",
-            (c["source_id"], c["platform"], c["channel"], c["title"], now),
+            """INSERT INTO clips (source_id, platform, channel, title, updated, kind)
+               VALUES (?,?,?,?,?,?) ON CONFLICT(source_id) DO NOTHING""",
+            (c["source_id"], c["platform"], c["channel"], c["title"], now, c.get("kind")),
         )
         if fields:
             cols = ", ".join(f"{k}=?" for k in fields)
@@ -112,7 +116,7 @@ class State:
 # --------------------------------------------------------------------------
 # Notifications ntfy
 # --------------------------------------------------------------------------
-def notify(cfg, title, message, priority=3, tags=None):
+def notify(cfg, title, message, priority=3, tags=None, click=None):
     n = cfg.get("ntfy") or {}
     if not n.get("url") or not n.get("topic"):
         return
@@ -123,7 +127,7 @@ def notify(cfg, title, message, priority=3, tags=None):
         requests.post(
             n["url"].rstrip("/"),
             json={"topic": n["topic"], "title": title, "message": message,
-                  "priority": priority, "tags": tags or []},
+                  "priority": priority, "tags": tags or [], **({"click": click} if click else {})},
             headers=headers, timeout=15,
         )
     except requests.RequestException as e:
@@ -261,7 +265,7 @@ def twitch_candidates(cfg, state=None, scan_vods=True):
                 log.error("Moments forts de %s : %s", login, e)
         for cl in eligible:
             out.append({
-                "source_id": "tw:" + cl["id"], "platform": "twitch",
+                "source_id": "tw:" + cl["id"], "platform": "twitch", "kind": "viewer",
                 "channel": cl["broadcaster_name"], "title": cl["title"],
                 "url": cl["url"], "views": cl["view_count"],
                 "credit_url": f"https://twitch.tv/{login}",
@@ -288,6 +292,7 @@ def vod_analysis(cfg, vod_id, vod_url):
     if lv.exists() and ft.exists():
         return json.loads(lv.read_text()), np.load(ft).astype(np.float32)
     log.info("Analyse du son de la rediffusion %s (quelques minutes la première fois)…", vod_id)
+    progress("Analyse d'un live", vod_id)
     t0 = time.time()
     if vod_id.startswith("yt-"):
         # YouTube bride la lecture directe (≈ temps réel : 4 h pour un live de 4 h).
@@ -485,6 +490,7 @@ def clipper_moments(cfg, vods_by_id, scan=True):
                 files = list(work.glob(f"{sid}.*"))
                 if not files:
                     continue
+                progress("Recherche des passages des clippers", (info.get("title") or sid)[:70])
                 _, clip_feats = analyse.features(str(files[0]))
                 cands = eligible(ts)          # seulement les lives commencés avant la vidéo
                 res = analyse.locate(clip_feats, cands) if cands else None
@@ -777,6 +783,7 @@ def vod_candidates(cfg, login, vods, clips, state, moments, model, scan=True, ow
 
         def add(start, end, views, rank):
             out.append({"source_id": f"vod:{vid}:{int(round(start))}", "platform": "twitch-vod",
+                        "kind": "clipper" if views > 0 else "moment",
                         "channel": v["user_name"], "title": v["title"], "url": v["url"],
                         "views": views, "credit_url": f"https://twitch.tv/{login}",
                         "start": start, "end": end, "rank": round(rank, 3)})
@@ -878,6 +885,7 @@ def deep_listen(cfg, vid, url, start, end, max_len):
     if model is None:
         return None
     _deep_budget["left"] -= 1
+    progress("Écoute approfondie", f"{vid} à {int(start) // 60} min")
     a, b = max(0.0, start - 5), end + 5
     tmp = resolve(cfg.get("work_dir", "work")) / "deeptmp"
     tmp.mkdir(parents=True, exist_ok=True)
@@ -1002,7 +1010,7 @@ def youtube_candidates(cfg):
                 continue
             for k, (s, e) in enumerate(best_windows(heatmap, info["duration"], length, per_video)):
                 out.append({
-                    "source_id": sid_prefix + str(k), "platform": "youtube",
+                    "source_id": sid_prefix + str(k), "platform": "youtube", "kind": "youtube",
                     "channel": name or info.get("channel") or info.get("uploader", "?"),
                     "title": info.get("title", ""), "url": info["webpage_url"],
                     "views": info.get("view_count") or 0,
@@ -1343,6 +1351,135 @@ class TikTokUploader:
 # --------------------------------------------------------------------------
 # Boucle principale
 # --------------------------------------------------------------------------
+# --------------------------------------------------------------------------
+# Avancement (affiché en direct dans l'interface)
+# --------------------------------------------------------------------------
+_progress = {"started": None}
+
+
+def progress(step, detail=""):
+    try:
+        if _progress["started"] is None:
+            _progress["started"] = time.time()
+        f = BASE / "work" / "status.json"
+        f.parent.mkdir(exist_ok=True)
+        tmp = f.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"step": step, "detail": detail, "t": time.time(),
+                                   "started": _progress["started"], "pid": os.getpid()}, ensure_ascii=False))
+        tmp.replace(f)
+    except OSError:
+        pass
+
+
+# --------------------------------------------------------------------------
+# Apprendre de ses propres Shorts (vues et likes sur RedifStream)
+# --------------------------------------------------------------------------
+KIND_NAMES = {"clipper": "repris par des clippers", "viewer": "clip des viewers",
+              "moment": "moment fort détecté", "youtube": "vidéo YouTube"}
+
+
+def own_stats(cfg, state, force=False):
+    """Relève les vues/likes des Shorts publiés (au plus toutes les 6 h) et en déduit ce qui marche :
+    effet de chaque streamer, de chaque type de passage, de la durée et de l'heure de publication."""
+    import numpy as np
+    work = resolve(cfg.get("work_dir", "work"))
+    f_raw, f_out = work / "ytstats.json", work / "performances.json"
+    out = json.loads(f_out.read_text()) if f_out.exists() else {}
+    if not force and out.get("t", 0) > time.time() - 6 * 3600:
+        return out
+    raw = json.loads(f_raw.read_text()) if f_raw.exists() else {}
+    url = (cfg.get("youtube_url") or "https://www.youtube.com/@redifstream2").rstrip("/") + "/shorts"
+    try:
+        with yt_dlp.YoutubeDL({**ydl_base_opts(cfg), "extract_flat": True, "playlistend": 200}) as y:
+            listing = y.extract_info(url, download=False)
+    except Exception as e:
+        log.warning("Statistiques YouTube indisponibles : %s", e)
+        return out
+    now = time.time()
+    rows = {r["youtube_id"]: dict(r) for r in state.db.execute(
+        "SELECT * FROM clips WHERE status='done' AND youtube_id IS NOT NULL")}
+    detail_budget = 30
+    for e in listing.get("entries") or []:
+        vid = e.get("id")
+        if not vid:
+            continue
+        r = raw.setdefault(vid, {})
+        if e.get("view_count") is not None:
+            r["views"] = int(e["view_count"])
+        r["title"] = e.get("title") or r.get("title", "")
+        # détails (likes, date) : pour les nouveaux, puis une fois par jour, dans la limite du budget
+        if detail_budget > 0 and now - r.get("fetched", 0) > 86400:
+            detail_budget -= 1
+            try:
+                with yt_dlp.YoutubeDL(ydl_base_opts(cfg)) as y:
+                    info = y.extract_info(f"https://www.youtube.com/shorts/{vid}", download=False)
+                r.update(views=int(info.get("view_count") or r.get("views") or 0),
+                         likes=int(info.get("like_count") or 0), ts=info.get("timestamp"),
+                         duration=info.get("duration"), fetched=now)
+            except Exception as ex:
+                log.debug("Short %s : %s", vid, ex)
+    f_raw.write_text(json.dumps(raw, ensure_ascii=False))
+
+    from zoneinfo import ZoneInfo
+    data = []
+    for vid, r in raw.items():
+        row = rows.get(vid)
+        if not row or r.get("views") is None:
+            continue
+        ts = r.get("ts")
+        if not ts:
+            try:
+                ts = datetime.fromisoformat(row["updated"]).timestamp()
+            except Exception:
+                continue
+        age_h = (now - ts) / 3600
+        if age_h < 24:            # trop récent pour juger
+            continue
+        kind = row.get("kind") or ("viewer" if row["platform"] == "twitch" else
+                                   "moment" if row["platform"] == "twitch-vod" else row["platform"])
+        hour = datetime.fromtimestamp(ts, ZoneInfo("Europe/Paris")).hour
+        dur = r.get("duration") or 0
+        # score : vues (échelle log) + un peu les likes, corrigé de l'âge (les vues montent avec le temps)
+        perf = (np.log10(r["views"] + 1) + 0.5 * np.log10(r.get("likes", 0) + 1)
+                - 0.3 * np.log10(max(age_h, 24) / 24))
+        data.append({"id": vid, "title": r.get("title") or row["title"], "streamer": row["channel"],
+                     "kind": kind, "hour": hour, "dur": dur, "views": r["views"], "likes": r.get("likes", 0),
+                     "perf": float(perf)})
+    res = {"t": now, "n": len(data), "effects": {}, "tables": {}, "top": []}
+    if data:
+        base = float(np.median([d["perf"] for d in data]))
+
+        def effects(key, label=lambda k: k):
+            groups = {}
+            for d in data:
+                groups.setdefault(d[key], []).append(d)
+            table = []
+            for k, ds in groups.items():
+                n = len(ds)
+                eff = (np.mean([d["perf"] for d in ds]) - base) * n / (n + 3)   # prudent s'il y a peu de Shorts
+                table.append({"name": label(k), "key": str(k), "n": n, "effect": round(float(eff), 3),
+                              "views": int(np.mean([d["views"] for d in ds])),
+                              "likes": int(np.mean([d["likes"] for d in ds]))})
+            return sorted(table, key=lambda x: -x["effect"])
+
+        res["tables"] = {
+            "Streamer": effects("streamer"),
+            "Type de passage": effects("kind", lambda k: KIND_NAMES.get(k, k)),
+            "Heure de publication": effects("hour", lambda k: f"{k}h"),
+        }
+        for d in data:
+            d["dur_b"] = "moins de 30 s" if d["dur"] and d["dur"] < 30 else "30-45 s" if d["dur"] and d["dur"] < 45 \
+                else "45 s et plus" if d["dur"] else "?"
+        res["tables"]["Durée"] = effects("dur_b")
+        res["effects"] = {"streamer": {t["key"].lower(): t["effect"] for t in res["tables"]["Streamer"]},
+                          "kind": {t["key"]: t["effect"] for t in res["tables"]["Type de passage"]}}
+        res["top"] = sorted(data, key=lambda d: -d["views"])[:5]
+        log.info("Statistiques : %d Short(s) analysé(s) ; meilleur streamer : %s, meilleur type : %s",
+                 len(data), res["tables"]["Streamer"][0]["name"], res["tables"]["Type de passage"][0]["name"])
+    f_out.write_text(json.dumps(res, ensure_ascii=False))
+    return res
+
+
 def run(cfg, dry_run=False, only=None, force=False):
     state = State(resolve(cfg.get("state_db", "clipbot.db")))
     max_tries = cfg.get("max_tries", 3)
@@ -1375,7 +1512,20 @@ def run(cfg, dry_run=False, only=None, force=False):
                 log.info("Prochain clip dans %d min.", wait.total_seconds() // 60 + 1)
                 return
 
+    progress("Recherche des clips et des lives")
+    perf = {}
+    if cfg.get("learn_from_stats", True):
+        try:
+            perf = own_stats(cfg, state).get("effects") or {}
+        except Exception as e:
+            log.warning("Statistiques ignorées : %s", e)
     candidates = twitch_candidates(cfg, state) + youtube_candidates(cfg)
+    # Ce qui marche sur ta chaîne (streamer, type de passage) fait monter ou descendre un candidat
+    for c in candidates:
+        bonus = (perf.get("streamer") or {}).get(c["channel"].lower(), 0) + (perf.get("kind") or {}).get(c.get("kind"), 0)
+        if bonus:
+            base_rank = c.get("rank", 2 + min(1.0, math.log10(c["views"] + 1) / 5))
+            c["rank"] = base_rank + 0.25 * max(-1.0, min(1.0, bonus))
     seen = set()  # un même clip ne doit être traité qu'une fois par passage
     if only:
         # « Publier maintenant » : ce clip-là seulement, sauf s'il est déjà publié
@@ -1445,14 +1595,17 @@ def _process(cfg, state, candidates, budget, yt, tt, dry_run):
         if posted >= budget:
             break
         log.info("→ %s | %s (%d vues)", c["channel"], c["title"], c["views"])
+        progress("Téléchargement de l'extrait", f"{c['channel']} — {c['title'][:60]}")
         work = Path(tempfile.mkdtemp(prefix="clip-", dir=work_root))
         try:
             src = download(c, work, cfg)
             try:
+                progress("Sous-titres", f"{c['channel']} — {c['title'][:60]}")
                 subs = transcribe(src, work / "subs.srt", cfg)
             except Exception as e:  # les sous-titres ne doivent jamais bloquer un clip
                 log.warning("Sous-titres impossibles (%s), clip publié sans", e)
                 subs = False
+            progress("Montage de la vidéo", f"{c['channel']} — {c['title'][:60]}")
             final = render(src, work, cfg, subs)
             meta = build_meta(cfg, c)
 
@@ -1469,6 +1622,7 @@ def _process(cfg, state, candidates, budget, yt, tt, dry_run):
             row = state.get(c["source_id"]) or {}
             links = []
             if yt:
+                progress("Publication sur YouTube", meta["title"][:80])
                 yt_id = row.get("youtube_id") or yt.upload(final, meta)
                 state.save(c, youtube_id=yt_id)
                 links.append("YouTube : " + (f"https://youtube.com/shorts/{yt_id}"
@@ -1482,13 +1636,17 @@ def _process(cfg, state, candidates, budget, yt, tt, dry_run):
                 time.sleep(random.uniform(20, 60))  # pause entre deux clips
             state.save(c, status="done", error=None)
             posted += 1
-            notify(cfg, f"Clip publié : {c['channel']}", f"{meta['title']}\n" + "\n".join(links),
-                   3, ["clapper"])
+            short_url = (f"https://youtube.com/shorts/{row.get('youtube_id') or yt_id}"
+                         if yt and (row.get("youtube_id") or yt_id) not in (None, "navigateur") else None)
+            notify(cfg, f"🎬 Vidéo publiée : {c['channel']}",
+                   f"{meta['title']}\n{KIND_NAMES.get(c.get('kind'), '')}\n" + "\n".join(links),
+                   3, ["clapper"], click=short_url)
         except Exception as e:
             log.exception("Échec pour %s", c["source_id"])
             if not dry_run:
                 state.fail(c, str(e))
-            notify(cfg, "ClipBot : échec", f"{c['channel']} – {c['title']}\n{e}", 4, ["warning"])
+            notify(cfg, "❌ ClipBot : échec d'une vidéo", f"{c['channel']} – {c['title']}\n{str(e)[:300]}",
+                   4, ["warning"])
         finally:
             shutil.rmtree(work, ignore_errors=True)
     log.info("Terminé : %d clip(s) traité(s)", posted)
@@ -1522,6 +1680,39 @@ def main():
     except BlockingIOError:
         log.info("Un passage est déjà en cours, on s'arrête.")
         return
+    lock.write(str(os.getpid()))
+    lock.flush()
+    import signal
+    try:
+        os.setpgrp()           # groupe à part : « Arrêter » coupe aussi ffmpeg, Chromium…
+    except OSError:
+        pass
+
+    def _stop(signum, frame):
+        log.warning("Arrêt demandé depuis l'interface : on s'arrête proprement.")
+        raise SystemExit(1)
+    signal.signal(signal.SIGTERM, _stop)
+    progress("Démarrage")
+    try:
+        _main_body(args)
+    except SystemExit:
+        raise
+    except Exception as e:
+        log.exception("ClipBot s'est arrêté sur une erreur")
+        try:
+            notify(load_config(args.config), "❌ ClipBot : plantage", f"{type(e).__name__} : {str(e)[:300]}",
+                   4, ["rotating_light"])
+        except Exception:
+            pass
+        raise
+    finally:
+        try:
+            (BASE / "work" / "status.json").unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _main_body(args):
     cfg = load_config(args.config)
     if args.check_browser:
         from browser_upload import BrowserSession
