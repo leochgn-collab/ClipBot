@@ -25,6 +25,7 @@ mkdir -p "$DIR"/{assets/fonts,trigger,logs,screenshots,preview,work,secrets}
 
 echo "→ Dépendances Python…"
 "$DIR/venv/bin/pip" install -q --only-binary=av -r "$DIR/requirements.txt"
+"$DIR/venv/bin/pip" install -q --upgrade yt-dlp   # YouTube change souvent : toujours la dernière version
 
 if [ ! -s "$DIR/assets/fonts/RubikMonoOne-Regular.ttf" ]; then
   curl -fsSL -o "$DIR/assets/fonts/RubikMonoOne-Regular.ttf" \

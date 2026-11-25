@@ -294,6 +294,8 @@ def vod_analysis(cfg, vod_id, vod_url):
     log.info("Analyse du son de la rediffusion %s (quelques minutes la première fois)…", vod_id)
     progress("Analyse d'un live", vod_id)
     t0 = time.time()
+    if vod_id.startswith("yt-") and youtube_blocked(cfg):
+        raise RuntimeError("YouTube en pause (vérification anti-robot), réessai plus tard")
     if vod_id.startswith("yt-"):
         # YouTube bride la lecture directe (≈ temps réel : 4 h pour un live de 4 h).
         # On télécharge d'abord le son seul en petite qualité (≈ 20 Mo/h), par morceaux, puis on l'analyse.
@@ -305,8 +307,13 @@ def vod_analysis(cfg, vod_id, vod_url):
                 "outtmpl": str(tmp / f"{vod_id}.%(ext)s"), "http_chunk_size": 10 * 1024 * 1024,
                 "concurrent_fragment_downloads": 4, "retries": 10, "fragment_retries": 10}
         try:
-            with yt_dlp.YoutubeDL(opts) as y:
-                y.extract_info(vod_url, download=True)
+            try:
+                with yt_dlp.YoutubeDL(opts) as y:
+                    y.extract_info(vod_url, download=True)
+            except Exception as e:
+                if is_bot_error(e):
+                    mark_youtube_blocked(cfg)
+                raise
             files = [f for f in tmp.glob(f"{vod_id}.*") if not f.name.endswith((".part", ".ytdl"))]
             if not files:
                 raise RuntimeError("son du live non téléchargé")
@@ -340,7 +347,7 @@ def vod_chat(cfg, vod_id, vod_url, scan=True):
     f, none = cache / f"{vod_id}.chat.npy", cache / f"{vod_id}.sanschat"
     if f.exists():
         return np.load(f)
-    if none.exists() or not scan or not vod_id.startswith("yt-"):
+    if none.exists() or not scan or not vod_id.startswith("yt-") or youtube_blocked(cfg):
         return None                     # Twitch : chat non incrusté et replay non accessible simplement
     tmp = resolve(cfg.get("work_dir", "work")) / "vodtmp"
     tmp.mkdir(parents=True, exist_ok=True)
@@ -417,7 +424,7 @@ def clipper_moments(cfg, vods_by_id, scan=True):
     for entry in cache.values():
         if entry.get("vod") in vods_by_id:
             found.setdefault(entry["vod"], []).append((entry["offset"], entry["duration"], entry.get("views", 0)))
-    if not scan:
+    if not scan or youtube_blocked(cfg):
         return found
     max_age = timedelta(hours=ccfg.get("lookback_hours", 72))
     now = datetime.now(timezone.utc)
@@ -699,6 +706,8 @@ def discover_rediffs(cfg, login, scan=True):
 
 def youtube_rediffs(cfg, url, login, scan=True):
     """Lives complets republiés sur une chaîne YouTube de rediffusions (ex. @MichouRediffs)."""
+    if scan and youtube_blocked(cfg):
+        scan = False              # YouTube en pause : seulement les lives déjà analysés
     vcfg = cfg["sources"]["twitch"].get("vods") or {}
     keywords = [k.lower() for k in vcfg.get("title_keywords") or [] if k]
     max_age = timedelta(hours=max(vcfg.get("lookback_hours", 72), 168))   # rediff mise en ligne après le live
@@ -879,7 +888,7 @@ def deep_listen(cfg, vid, url, start, end, max_len):
     cache = json.loads(f.read_text()) if f.exists() else {}
     if key in cache:
         return cache[key]
-    if _deep_budget["left"] <= 0:
+    if _deep_budget["left"] <= 0 or (vid.startswith("yt-") and youtube_blocked(cfg)):
         return None
     model = _whisper(cfg)
     if model is None:
@@ -933,8 +942,38 @@ def _whisper(cfg):
 # --------------------------------------------------------------------------
 # Sources : YouTube (moments les plus revus via la heatmap)
 # --------------------------------------------------------------------------
+BOT_MARKERS = ("confirm you're not a bot", "confirm you’re not a bot", "Sign in to confirm")
+
+
+def youtube_blocked(cfg):
+    """YouTube a demandé « confirme que tu n'es pas un robot » récemment : on le laisse tranquille un moment."""
+    f = resolve(cfg.get("work_dir", "work")) / "youtube_bloque"
+    return f.exists() and f.stat().st_mtime > time.time()
+
+
+def mark_youtube_blocked(cfg, hours=2):
+    f = resolve(cfg.get("work_dir", "work")) / "youtube_bloque"
+    first = not youtube_blocked(cfg)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.touch()
+    t = time.time() + hours * 3600
+    os.utime(f, (t, t))
+    if first:
+        log.warning("YouTube demande de confirmer qu'on n'est pas un robot : pause YouTube de %d h.", hours)
+        notify(cfg, "⚠️ ClipBot : YouTube bloque les téléchargements",
+               f"YouTube demande de confirmer que ce n'est pas un robot. ClipBot laisse YouTube tranquille "
+               f"{hours} h et continue avec Twitch. Si ça revient souvent : Réglages → cookies de téléchargement.",
+               4, ["warning"])
+
+
+def is_bot_error(e):
+    return any(m.lower() in str(e).lower() for m in BOT_MARKERS)
+
+
 def ydl_base_opts(cfg):
-    opts = {"quiet": True, "no_warnings": True, "noprogress": True}
+    opts = {"quiet": True, "no_warnings": True, "noprogress": True,
+            # discret : petites pauses entre les requêtes (moins de risque de blocage YouTube)
+            "sleep_interval_requests": 0.75}
     cookies = cfg.get("ytdlp_cookies")
     if cookies:
         opts["cookiefile"] = str(resolve(cookies))
@@ -1385,7 +1424,7 @@ def own_stats(cfg, state, force=False):
     work = resolve(cfg.get("work_dir", "work"))
     f_raw, f_out = work / "ytstats.json", work / "performances.json"
     out = json.loads(f_out.read_text()) if f_out.exists() else {}
-    if not force and out.get("t", 0) > time.time() - 6 * 3600:
+    if (not force and out.get("t", 0) > time.time() - 6 * 3600) or youtube_blocked(cfg):
         return out
     raw = json.loads(f_raw.read_text()) if f_raw.exists() else {}
     url = (cfg.get("youtube_url") or "https://www.youtube.com/@redifstream2").rstrip("/") + "/shorts"
@@ -1594,6 +1633,9 @@ def _process(cfg, state, candidates, budget, yt, tt, dry_run):
     for c in candidates:
         if posted >= budget:
             break
+        from_youtube = "youtube.com" in (c.get("url") or "") or c["source_id"].startswith(("vod:yt-", "yt:"))
+        if from_youtube and youtube_blocked(cfg):
+            continue
         log.info("→ %s | %s (%d vues)", c["channel"], c["title"], c["views"])
         progress("Téléchargement de l'extrait", f"{c['channel']} — {c['title'][:60]}")
         work = Path(tempfile.mkdtemp(prefix="clip-", dir=work_root))
@@ -1642,6 +1684,11 @@ def _process(cfg, state, candidates, budget, yt, tt, dry_run):
                    f"{meta['title']}\n{KIND_NAMES.get(c.get('kind'), '')}\n" + "\n".join(links),
                    3, ["clapper"], click=short_url)
         except Exception as e:
+            if is_bot_error(e):
+                # pas la faute du clip : YouTube bloque un moment. On ne compte pas d'essai, on passe à Twitch.
+                mark_youtube_blocked(cfg)
+                state.save(c, status="error", error="YouTube bloque temporairement (anti-robot) : réessai auto")
+                continue
             log.exception("Échec pour %s", c["source_id"])
             if not dry_run:
                 state.fail(c, str(e))

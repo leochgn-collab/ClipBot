@@ -1055,9 +1055,12 @@ def logo_file():
 def cookies():
     b = load_cfg()["publish"].setdefault("browser", {})
     files = {"tiktok": resolve(b.get("tiktok_cookies", "secrets/tiktok_cookies.txt")),
-             "youtube": resolve(b.get("youtube_cookies", "secrets/youtube_cookies.txt"))}
+             "youtube": resolve(b.get("youtube_cookies", "secrets/youtube_cookies.txt")),
+             "telechargement": resolve("secrets/ytdlp_cookies.txt")}
     if request.method == "POST":
-        which = request.form["which"]
+        which = request.form.get("which")
+        if which not in files:
+            abort(400)
         text = request.form.get("text", "").strip()
         up = request.files.get("file")
         if up and up.filename:
@@ -1068,15 +1071,22 @@ def cookies():
             files[which].parent.mkdir(exist_ok=True)
             files[which].write_text(text + "\n", encoding="utf-8")
             files[which].chmod(0o600)
-            flash(f"Cookies {which} enregistrés ✅ Lance « Vérifier les connexions » pour tester.")
+            if which == "telechargement":
+                cfg = load_cfg()
+                cfg["ytdlp_cookies"] = "secrets/ytdlp_cookies.txt"
+                save_cfg(cfg)
+                flash("Cookies de téléchargement enregistrés ✅ Ils servent à télécharger les rediffs YouTube.")
+            else:
+                flash(f"Cookies {which} enregistrés ✅ Lance « Vérifier les connexions » pour tester.")
         return redirect(url_for("cookies"))
     info = {k: (datetime.fromtimestamp(p.stat().st_mtime).strftime("%d/%m/%Y %H:%M") if p.exists() else None)
             for k, p in files.items()}
     return page("""<h1>Cookies</h1>
 <p class="mut">Exporte-les depuis Chrome avec l'extension « Get cookies.txt LOCALLY », une fois connecté au site. Ils ne sont jamais réaffichés ici.</p>
-{% for k,n in [('tiktok','TikTok'),('youtube','YouTube')] %}
+{% for k,n in [('tiktok','TikTok'),('youtube','YouTube (publication)'),('telechargement','Téléchargements YouTube (rediffs)')] %}
 <div class="card"><h2 style="margin-top:0">{{n}} — {{'✅ mis à jour le ' ~ info[k] if info[k] else '❌ absent'}}</h2>
 <form method="post" enctype="multipart/form-data"><input type="hidden" name="csrf" value="{{csrf_token()}}"><input type="hidden" name="which" value="{{k}}">
+{% if k == 'telechargement' %}<p class="mut" style="font-size:13px">Seulement si YouTube bloque les téléchargements (« confirm you're not a bot »). Utilise un <b>autre compte Google</b> que RedifStream : YouTube peut déconnecter un compte utilisé pour télécharger. Exporte-les en navigation privée, puis ferme la fenêtre sans te déconnecter.</p>{% endif %}
 <label>Fichier cookies.txt</label><input type="file" name="file" accept=".txt">
 <label>…ou colle son contenu</label><textarea name="text" rows="4"></textarea><br><br><button>Enregistrer</button></form></div>{% endfor %}""",
                 info=info)

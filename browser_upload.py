@@ -205,7 +205,19 @@ class BrowserYouTube:
     def _fill(self, page, selector, text):
         box = page.locator(selector).first
         box.wait_for(state="visible")
-        box.click()
+        try:
+            box.click(timeout=15_000)
+        except Exception:
+            # une fenêtre YouTube (astuce, vérification…) passe devant : on la ferme et on force
+            for _ in range(2):
+                page.keyboard.press("Escape")
+                time.sleep(0.5)
+            try:
+                box.scroll_into_view_if_needed(timeout=5_000)
+                box.click(timeout=10_000)
+            except Exception:
+                box.click(force=True, timeout=10_000)
+                box.evaluate("el => el.focus()")
         page.keyboard.press("Control+A")
         page.keyboard.press("Delete")
         # insert_text : fiable avec les emojis et les accents (type() perdait des lignes)
