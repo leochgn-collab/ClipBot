@@ -275,3 +275,65 @@ def scores(model, P, length, step=5):
     X = np.array([window_feats(P, s, length) for s in starts])
     z = (X - np.asarray(model["mu"])) / np.asarray(model["sd"])
     return starts, 1 / (1 + np.exp(-(z @ np.asarray(model["w"]) + model["b"])))
+
+
+# ---------------------------------------------------------------------------
+# Découpage intelligent d'un extrait
+# ---------------------------------------------------------------------------
+def voice_curve(F):
+    """Énergie de la voix (225 Hz – 1,6 kHz), 10 fois par seconde, lissée sur 0,3 s."""
+    v = np.log10((10 ** np.asarray(F[:, 14:48], np.float64)).sum(1) + 1e-12)
+    return np.convolve(v, np.ones(3) / 3, mode="same")
+
+
+def excitement(P, model=None):
+    """Intensité seconde par seconde : selon le modèle appris (poids des moyennes), sinon le volume."""
+    if model is not None and len(P):
+        k = P.shape[1]
+        w = np.asarray(model["w"][:k]) / np.asarray(model["sd"][:k])
+        e = (P - np.asarray(model["mu"][:k])) @ w
+    else:
+        e = P[:, 1] if len(P) else np.zeros(0)     # volume par rapport aux 5 dernières minutes
+    return np.convolve(e, np.ones(5) / 5, mode="same")
+
+
+def refine(start, end, F, ex, min_len=25, max_len=59, lead=4, tail=3, frac=0.3, v=None):
+    """Ajuste un extrait : garde le cœur de l'action (là où l'intensité reste haute), avec un peu de
+    contexte avant, puis place le début et la fin dans un silence pour ne pas couper une phrase."""
+    n = len(ex)
+    a0, b0 = max(0, start - 10), min(n, end + 10)
+    if b0 - a0 < min_len:
+        return start, end
+    seg = ex[a0:b0]
+    peak = int(np.argmax(seg)) + a0
+    base = np.median(ex)
+    level = base + frac * (ex[peak] - base)
+    a = peak
+    while a > a0 and ex[a - 1] >= level:
+        a -= 1
+    b = peak + 1
+    while b < b0 and ex[b] >= level:
+        b += 1
+    a, b = a - lead, b + tail
+    if b - a < min_len:                               # trop court : on élargit autour du cœur
+        extra = min_len - (b - a)
+        a, b = a - extra // 2, b + extra - extra // 2
+    if b - a > max_len - 2:                           # trop long : on garde autour du pic
+        a = max(a, min(peak - lead - 6, b - (max_len - 2)))
+        b = a + max_len - 2
+    a, b = max(0, a), min(n, b)
+    return snap(a, b, F, min_len, max_len, v)
+
+
+def snap(a, b, F, min_len=10, max_len=59, v=None):
+    """Place le début et la fin dans un silence de la voix, pour ne pas couper une phrase."""
+    v = voice_curve(F) if v is None else v
+    # début : moment le plus calme de la voix entre 4 s avant et 1 s après
+    lo, hi = max(0, int((a - 4) * FPS)), min(len(v), int((a + 1) * FPS))
+    sa = (lo + int(np.argmin(v[lo:hi]))) / FPS if hi > lo else a
+    # fin : moment le plus calme entre 1 s avant et 3 s après, sans dépasser la durée max
+    lo = int(max(sa * FPS + min_len * FPS, (b - 1) * FPS))
+    hi = int(min(len(v), (b + 3) * FPS, sa * FPS + max_len * FPS))
+    sb = (lo + int(np.argmin(v[lo:hi]))) / FPS if hi > lo else min(b, sa + max_len)
+    return round(sa, 1), round(sb, 1)
+

@@ -11,6 +11,7 @@ Usage :
 import argparse
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -243,23 +244,27 @@ def twitch_candidates(cfg, state=None, scan_vods=True):
             log.error("Clippers : %s", e)
     model = load_model(cfg) if all_vods else None
     for login, min_views, clips, vods in per_channel:
-        if vods:
-            try:
-                out += vod_candidates(cfg, login, vods, clips, state, moments, model, scan_vods)
-            except Exception as e:
-                log.error("Moments forts de %s : %s", login, e)
+        eligible = []
         for cl in clips:
             if cl["view_count"] < min_views or cl["duration"] > max_d + 5:
                 continue
             if allowed_games is not None and cl.get("game_id") not in allowed_games:
                 log.debug("Ignoré (hors jeux choisis) : %s", cl["title"])
                 continue
+            eligible.append(cl)
+        if vods:
+            try:
+                out += vod_candidates(cfg, login, vods, clips, state, moments, model, scan_vods,
+                                      own_clips={cl["id"] for cl in eligible})
+            except Exception as e:
+                log.error("Moments forts de %s : %s", login, e)
+        for cl in eligible:
             out.append({
                 "source_id": "tw:" + cl["id"], "platform": "twitch",
                 "channel": cl["broadcaster_name"], "title": cl["title"],
                 "url": cl["url"], "views": cl["view_count"],
                 "credit_url": f"https://twitch.tv/{login}",
-                "start": None, "end": None,
+                "start": None, "end": None, "rank": round(2 + min(1.0, math.log10(cl["view_count"] + 1) / 5), 3),
             })
     log.info("Twitch : %d clip(s) candidat(s)", len(out))
     return out
@@ -482,7 +487,7 @@ def pick_with_model(model, P, length, count, blocked=(), min_gap=120, boosts=(),
         t = starts[k]
         if any(a < t + length and t < b for a, b in taken):
             continue
-        picks.append((t, t + length))
+        picks.append((t, t + length, float(sc[k])))
         taken.append((t - min_gap, t + length + min_gap))
     return sorted(picks)
 
@@ -511,7 +516,7 @@ def pick_highlights(levels, length, count, blocked=(), min_gap=120, boosts=(), s
             break
         if any(a < t + length and t < b for a, b in taken):
             continue
-        picks.append((t, t + length))
+        picks.append((t, t + length, total / length / 20.0))   # force ≈ dB au-dessus du niveau habituel / 20
         taken.append((t - min_gap, t + length + min_gap))
     return sorted(picks)
 
@@ -657,7 +662,7 @@ def youtube_rediffs(cfg, url, login, scan=True):
     return vods
 
 
-def vod_candidates(cfg, login, vods, clips, state, moments, model, scan=True):
+def vod_candidates(cfg, login, vods, clips, state, moments, model, scan=True, own_clips=frozenset()):
     """Extraits pris dans les rediffusions d'une chaîne, en plus des clips Twitch :
     1) les moments repris par les comptes de clippers (YouTube/TikTok), retrouvés dans le live ;
     2) les moments forts (modèle appris, ou pics de son), autour des passages clippés par les viewers."""
@@ -671,31 +676,41 @@ def vod_candidates(cfg, login, vods, clips, state, moments, model, scan=True):
             for sid, st in state.db.execute(
                     "SELECT source_id, status FROM clips WHERE source_id LIKE ?", (f"vod:{vid}:%",)):
                 if st == "done":
-                    start = int(sid.rsplit(":", 1)[1])
+                    start = int(float(sid.rsplit(":", 1)[1]))
                     blocked.append((start, start + length))
         boosts = []
         for cl in clips:
             if cl.get("video_id") == vid and cl.get("vod_offset") is not None:
-                boosts.append(cl["vod_offset"])
                 row = state.get("tw:" + cl["id"]) if state is not None else None
-                if row and row["status"] == "done":
+                if cl["id"] in own_clips or (row and row["status"] == "done"):
+                    # ce clip est (ou sera) publié tel quel : on ne refait pas le même moment
                     blocked.append((cl["vod_offset"], cl["vod_offset"] + int(cl["duration"])))
+                else:
+                    boosts.append(cl["vod_offset"])
 
-        def add(start, end, views):
-            out.append({"source_id": f"vod:{vid}:{start}", "platform": "twitch-vod",
+        def add(start, end, views, rank):
+            out.append({"source_id": f"vod:{vid}:{int(round(start))}", "platform": "twitch-vod",
                         "channel": v["user_name"], "title": v["title"], "url": v["url"],
                         "views": views, "credit_url": f"https://twitch.tv/{login}",
-                        "start": start, "end": end})
+                        "start": start, "end": end, "rank": round(rank, 3)})
 
+        import analyse
+        vc = analyse.voice_curve(v["feats"])      # pour couper dans les silences, pas en pleine phrase
         # 1) Moments repris par les clippers (prioritaires : déjà validés par le public)
-        for offset, dur, views in sorted(moments.get(vid, []), key=lambda m: -m[2]):
+        ms = moments.get(vid, [])
+
+        def agree(o, d):          # combien de clippers ont repris ce même passage
+            return sum(1 for o2, d2, _ in ms if o2 < o + d and o < o2 + d2)
+        # tri : passage repris par plusieurs clippers d'abord, puis le plus vu
+        for offset, dur, views in sorted(ms, key=lambda m: (-agree(m[0], m[1]), -m[2])):
             end = offset + min(max(dur, 10), length)
             if any(a < end and offset < b for a, b in blocked):
                 continue
-            add(offset, end, max(int(views), 1))
+            n = agree(offset, dur)
+            s0, e0 = analyse.snap(offset, end, v["feats"], min(10, end - offset), length, vc)
+            add(s0, e0, max(int(views), 1), 3 + min(0.7, math.log10(int(views) + 1) / 10) + min(0.29, 0.1 * (n - 1)))
             blocked.append((offset, end))
         # Exemples pour l'apprentissage : passages repris par les clippers et par les viewers
-        import analyse
         P = analyse.per_second(v["levels"], v["feats"])
         positives = [(o, o + max(d, 10)) for o, d, _ in moments.get(vid, [])]
         positives += [(cl["vod_offset"], cl["vod_offset"] + int(cl["duration"]))
@@ -711,8 +726,13 @@ def vod_candidates(cfg, login, vods, clips, state, moments, model, scan=True):
             picks = pick_with_model(model, P, length, count, blocked, gap, boosts)
         else:
             picks = pick_highlights(v["levels"], length, count, blocked, gap, boosts)
-        for start, end in picks:
-            add(start, end, 0)
+        # 3) Découpage intelligent : le cœur de l'action + un peu de contexte, coupé dans un silence
+        ex = analyse.excitement(P, model) if len(P) else None
+        for start, end, strength in picks:
+            if ex is not None and len(ex) > end:
+                start, end = analyse.refine(start, end, v["feats"], ex, min_len=min(25, length),
+                                            max_len=length, v=vc)
+            add(start, end, 0, 1 + min(0.99, strength))
     return out
 
 
@@ -1187,7 +1207,9 @@ def run(cfg, dry_run=False, only=None, force=False):
         candidates = [c for c in candidates
                       if c["source_id"] not in seen and not seen.add(c["source_id"])
                       and not state.is_done(c["source_id"], max_tries)]
-        candidates.sort(key=lambda c: c["views"], reverse=True)
+        # Ordre : moments des clippers > clips des viewers > moments forts (chacun trié par force/vues)
+        candidates.sort(key=lambda c: (c.get("rank", 2 + min(1.0, math.log10(c["views"] + 1) / 5)),
+                                       c["views"]), reverse=True)
         if cfg.get("rotation", True):
             # Le créateur publié il y a le plus longtemps passe en premier
             # (à égalité : le clip le plus vu). Tri stable : garde l'ordre par vues.
