@@ -21,6 +21,8 @@ sources:
     channels:
       - login: nom_du_streamer     # pseudo Twitch (dans l'URL de la chaîne)
         min_views: 500             # seuil propre à cette chaîne (optionnel)
+        rediffs: "https://www.youtube.com/@ChaineDesRediffs"   # lives complets sur YouTube (optionnel),
+                                   # utilisés si les rediffusions Twitch sont absentes ou réservées aux abonnés
       - login: autre_streamer
 
   # Comptes de clippers (YouTube ou TikTok) : ClipBot retrouve dans le live d'origine le passage qu'ils ont clippé

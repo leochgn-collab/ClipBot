@@ -221,6 +221,12 @@ def twitch_candidates(cfg, state=None, scan_vods=True):
                 vods = collect_vods(cfg, tw, login, scan_vods)
             except Exception as e:  # une rediffusion illisible ne bloque pas les clips
                 log.error("Rediffusions de %s : %s", login, e)
+            rediffs = ch.get("rediffs") if isinstance(ch, dict) else None
+            if rediffs and not vods:      # rien de lisible sur Twitch -> rediffs YouTube
+                try:
+                    vods = youtube_rediffs(cfg, rediffs, login, scan_vods)
+                except Exception as e:
+                    log.error("Rediffs YouTube de %s : %s", login, e)
         all_vods.update(vods)
         per_channel.append((login, min_views, clips, vods))
     # Les comptes de clippers sont comparés à TOUS les lives (Michou, Squeezie, Inoxtag…) en une fois
@@ -537,6 +543,64 @@ def collect_vods(cfg, tw, login, scan=True):
                 log.error("Rediffusion %s illisible : %s", v["id"], e)
             continue
         vods[v["id"]] = {**v, "levels": levels, "feats": feats, "login": login}
+    return vods
+
+
+def youtube_rediffs(cfg, url, login, scan=True):
+    """Lives complets republiés sur une chaîne YouTube de rediffusions (ex. @MichouRediffs)."""
+    vcfg = cfg["sources"]["twitch"].get("vods") or {}
+    keywords = [k.lower() for k in vcfg.get("title_keywords") or [] if k]
+    max_age = timedelta(hours=max(vcfg.get("lookback_hours", 72), 168))   # rediff mise en ligne après le live
+    now = datetime.now(timezone.utc)
+    work = resolve(cfg.get("work_dir", "work"))
+    url = url.strip().rstrip("/")
+    if not url.endswith(("/videos", "/streams")):
+        url += "/videos"
+    want = int(vcfg.get("max_vods", 2))
+    with yt_dlp.YoutubeDL({**ydl_base_opts(cfg), "extract_flat": True, "playlistend": want * 4}) as y:
+        listing = y.extract_info(url, download=False)
+    vods = {}
+    for e in listing.get("entries") or []:
+        if len(vods) >= want:
+            break
+        yid, title = e.get("id"), e.get("title") or ""
+        if not yid or (e.get("duration") and e["duration"] < 1800):
+            continue                                       # trop court pour être un live complet
+        if keywords and not any(k in title.lower() for k in keywords):
+            log.debug("Rediff YouTube ignorée (titre) : %s", title)
+            continue
+        vid = "yt-" + yid
+        watch = f"https://www.youtube.com/watch?v={yid}"
+        meta_file = work / "vodcache" / f"{vid}.meta.json"
+        if meta_file.exists():
+            info = json.loads(meta_file.read_text())
+        elif not scan:
+            continue
+        else:
+            with yt_dlp.YoutubeDL(ydl_base_opts(cfg)) as y:
+                full = y.extract_info(watch, download=False)
+            info = {"timestamp": full.get("release_timestamp") or full.get("timestamp"),
+                    "duration": full.get("duration") or 0, "title": full.get("title") or title}
+            meta_file.parent.mkdir(parents=True, exist_ok=True)
+            meta_file.write_text(json.dumps(info))
+        if (info.get("duration") or 0) < 1800 or not info.get("timestamp"):
+            continue
+        published = datetime.fromtimestamp(info["timestamp"], timezone.utc)
+        if now - published > max_age:
+            continue
+        if not scan and not (work / "vodcache" / f"{vid}.s60.npy").exists():
+            continue
+        try:
+            levels, feats = vod_analysis(cfg, vid, watch)
+        except Exception as ex:
+            log.error("Rediff YouTube %s illisible : %s", yid, ex)
+            continue
+        # le live a eu lieu avant la mise en ligne : on recule la date pour accepter les Shorts des clippers
+        created = (published - timedelta(days=3)).isoformat()
+        vods[vid] = {"id": vid, "title": info["title"], "url": watch, "user_name": login,
+                     "created_at": created, "levels": levels, "feats": feats, "login": login}
+    if vods:
+        log.info("Rediffs YouTube de %s : %d live(s) utilisable(s)", login, len(vods))
     return vods
 
 

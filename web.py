@@ -622,10 +622,17 @@ def channels():
     if request.method == "POST":
         f = request.form
         tw_list = []
-        for login, mv in zip(f.getlist("tw_login"), f.getlist("tw_min")):
+        rediffs = f.getlist("tw_rediff")
+        for k, (login, mv) in enumerate(zip(f.getlist("tw_login"), f.getlist("tw_min"))):
             login = login.strip().lstrip("@").lower()
             if login:
-                tw_list.append({"login": login, **({"min_views": int(mv)} if mv.strip().isdigit() else {})})
+                row = {"login": login, **({"min_views": int(mv)} if mv.strip().isdigit() else {})}
+                rd = (rediffs[k] if k < len(rediffs) else "").strip()
+                if rd.startswith("@"):
+                    rd = "https://www.youtube.com/" + rd
+                if re.fullmatch(r"https://(www\.|m\.)?youtube\.com/(@[\w.\-]+|channel/[\w\-]+|c/[\w.\-]+)(/videos|/streams)?/?", rd):
+                    row["rediffs"] = rd
+                tw_list.append(row)
         yt_list = []
         for url, name in zip(f.getlist("yt_url"), f.getlist("yt_name")):
             if url.strip():
@@ -643,7 +650,9 @@ def channels():
 <div class="card"><h2 style="margin-top:0">Twitch <label style="display:inline;margin-left:10px"><input type="checkbox" name="tw_on" style="width:auto" {{'checked' if tw.enabled}}> activé</label></h2>
 <div id="tw">{% for c in tw_rows + [{}] %}<div class="row" style="margin-bottom:6px">
 <input name="tw_login" placeholder="pseudo Twitch" value="{{c.login or ''}}">
-<input name="tw_min" placeholder="vues min. (défaut {{tw.min_views or 0}})" value="{{c.min_views or ''}}" style="max-width:220px"></div>{% endfor %}</div>
+<input name="tw_min" placeholder="vues min. (défaut {{tw.min_views or 0}})" value="{{c.min_views or ''}}" style="max-width:220px">
+<input name="tw_rediff" placeholder="chaîne YouTube des rediffs (ex. @MichouRediffs)" value="{{c.rediffs or ''}}"></div>{% endfor %}</div>
+<p class="mut" style="font-size:13px">Rediffs YouTube : utilisées quand les rediffusions Twitch sont absentes ou réservées aux abonnés. ClipBot y cherche les moments forts et les passages des clippers comme sur Twitch.</p>
 <button type="button" class="sec sm" onclick="add('tw')">+ Ajouter</button></div>
 <div class="card"><h2 style="margin-top:0">YouTube <label style="display:inline;margin-left:10px"><input type="checkbox" name="yt_on" style="width:auto" {{'checked' if yt.enabled}}> activé</label></h2>
 <div id="yt">{% for c in yt_rows + [{}] %}<div class="row" style="margin-bottom:6px">
