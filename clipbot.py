@@ -522,10 +522,19 @@ def collect_vods(cfg, tw, login, scan=True):
             continue
         if not scan and not (work / "vodcache" / f"{v['id']}.s60.npy").exists():
             continue
+        marker = work / "vodcache" / f"{v['id']}.abonnes"
+        if marker.exists() and time.time() - marker.stat().st_mtime < 86400:
+            continue                      # déjà vu « réservée aux abonnés » il y a moins de 24 h
         try:
             levels, feats = vod_analysis(cfg, v["id"], v["url"])
         except Exception as e:
-            log.error("Rediffusion %s illisible : %s", v["id"], e)
+            if "subscriber-only" in str(e) or "logged into an account" in str(e):
+                log.warning("Rediffusion %s de %s réservée aux abonnés : ignorée (cookies Twitch d'un compte "
+                            "abonné nécessaires pour l'analyser)", v["id"], login)
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                marker.touch()
+            else:
+                log.error("Rediffusion %s illisible : %s", v["id"], e)
             continue
         vods[v["id"]] = {**v, "levels": levels, "feats": feats, "login": login}
     return vods
