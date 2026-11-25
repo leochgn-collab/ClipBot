@@ -711,6 +711,7 @@ def settings():
         tw["games"] = [g.strip() for g in f.get("games", "").split(",") if g.strip()]
         vd = tw.setdefault("vods", {})
         vd["enabled"] = "vods_on" in f
+        vd["chat"] = "vods_chat" in f
         vd["highlights_per_vod"] = max(1, min(int(f.get("vods_per") or 6), 30))
         vd["max_vods"] = max(1, min(int(f.get("vods_max") or 2), 10))
         vd["min_gap_seconds"] = max(30, min(int(f.get("vods_gap") or 120), 3600))
@@ -817,6 +818,7 @@ def settings():
 <p class="mut" style="font-size:13px">En plus des clips des viewers, ClipBot analyse les rediffusions et repère les moments forts, sans jamais reprendre un passage publié. Il apprend tout seul à les reconnaître à partir des passages déjà clippés par les viewers et les clippers (volume, cris, rires, rythme de la voix…).</p>
 <p style="font-size:13px">🧠 {{ model_info }}</p>
 <label><input type="checkbox" name="vods_on" style="width:auto" {{'checked' if (tw.vods or {}).enabled}}> Activer</label>
+<label><input type="checkbox" name="vods_chat" style="width:auto" {{'checked' if (tw.vods or {}).get('chat', True)}}> Analyser aussi le chat (replay du chat YouTube, ou chat incrusté dans la rediff)</label>
 <div class="row"><div><label>Extraits max par live</label><input type="number" name="vods_per" min="1" max="30" value="{{(tw.vods or {}).highlights_per_vod or 6}}"></div>
 <div><label>Lives regardés par chaîne</label><input type="number" name="vods_max" min="1" max="10" value="{{(tw.vods or {}).max_vods or 2}}"></div>
 <div><label>Écart entre 2 extraits (s)</label><input type="number" name="vods_gap" min="30" value="{{(tw.vods or {}).min_gap_seconds or 120}}"></div></div>

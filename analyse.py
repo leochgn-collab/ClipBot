@@ -9,6 +9,7 @@
 Banc d'essai (lives de test, 400+ Shorts déformés) : ~98 % de Shorts retrouvés à la bonne seconde,
 0 faux positif ; moments forts : 92 % d'extraits justes avec le modèle contre 72 % au volume seul.
 """
+import re
 import subprocess
 
 import numpy as np
@@ -339,3 +340,102 @@ def snap(a, b, F, min_len=10, max_len=59, v=None):
     sb = (lo + int(np.argmin(v[lo:hi]))) / FPS if hi > lo else min(b, sa + max_len)
     return round(sa, 1), round(sb, 1)
 
+
+
+# ---------------------------------------------------------------------------
+# Chat du live : messages par seconde (replay du chat) ou chat incrusté dans la vidéo
+# ---------------------------------------------------------------------------
+_LAUGH = re.compile(r"(mdr|ptdr|xpt|lol|xd|kekw|omegalul|lul|😂|🤣|haha|ahah|jpp|wtf|\?\?\?|!!!|gg\b|pog|clip)", re.I)
+
+
+def chat_from_messages(msgs, n_seconds):
+    """msgs = [(seconde, texte)] -> activité du chat par seconde (messages + rires/réactions comptés double)."""
+    a = np.zeros(n_seconds)
+    for t, txt in msgs:
+        k = int(t)
+        if 0 <= k < n_seconds:
+            a[k] += 1 + (1 if _LAUGH.search(txt or "") else 0)
+    return a
+
+
+def parse_youtube_live_chat(path):
+    """Fichier live_chat.json de yt-dlp (replay du chat YouTube) -> [(seconde, texte)]."""
+    import json
+    out = []
+    with open(path, encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            rep = d.get("replayChatItemAction") or {}
+            t = int(rep.get("videoOffsetTimeMsec") or 0) / 1000
+            for act in rep.get("actions") or []:
+                item = (act.get("addChatItemAction") or {}).get("item") or {}
+                r = item.get("liveChatTextMessageRenderer") or item.get("liveChatPaidMessageRenderer")
+                if not r:
+                    continue
+                runs = (r.get("message") or {}).get("runs") or []
+                txt = "".join(x.get("text") or (x.get("emoji") or {}).get("shortcuts", [""])[0] for x in runs)
+                out.append((t, txt))
+    return out
+
+
+def video_chat_activity(source, fps=2, W=160, H=90):
+    """Chat incrusté dans la vidéo : repère la bande verticale où du texte défile vers le haut
+    et mesure, seconde par seconde, de combien il défile (≈ nombre de messages).
+    Renvoie un tableau par seconde, ou None si aucun chat incrusté n'est détecté."""
+    p = subprocess.Popen(["ffmpeg", "-nostats", "-loglevel", "error", "-i", source, "-an",
+                          "-vf", f"fps={fps},scale={W}:{H},format=gray", "-f", "rawvideo", "-"],
+                         stdout=subprocess.PIPE)
+    strips, K = 8, 12
+    sw = W // strips
+    prev = None
+    scroll = []          # (images, bandes) : pixels défilés vers le haut
+    while True:
+        buf = p.stdout.read(W * H * 600)
+        if not buf:
+            break
+        fr = np.frombuffer(buf[:len(buf) // (W * H) * W * H], np.uint8).reshape(-1, H, W).astype(np.float32)
+        if prev is not None:
+            fr = np.concatenate([prev[None], fr])
+        A, B = fr[:-1], fr[1:]                                   # image précédente, image suivante
+        res = np.zeros((len(B), strips))
+        for s in range(strips):
+            a, b = A[:, :, s * sw:(s + 1) * sw], B[:, :, s * sw:(s + 1) * sw]
+            d0 = np.abs(b - a).mean(axis=(1, 2))
+            ds = np.stack([np.abs(b[:, :-k] - a[:, k:]).mean(axis=(1, 2)) for k in range(1, K + 1)], 1)
+            k = ds.argmin(1) + 1
+            moved = (d0 > 4) & (ds.min(1) < 0.55 * d0)
+            res[:, s] = np.where(moved, k, 0)
+        scroll.append(res)
+        prev = fr[-1]
+    p.wait()
+    if not scroll:
+        return None
+    S = np.concatenate(scroll)
+    frac = (S > 0).mean(0)
+    best = int(frac.argmax())
+    others = np.delete(frac, best)
+    # chat présent : une bande qui défile souvent, nettement plus que le reste de l'image
+    if frac[best] < 0.08 or frac[best] < 2.5 * (np.median(others) + 1e-3):
+        return None
+    cols = [s for s in range(strips) if frac[s] >= 0.6 * frac[best]]
+    rate = S[:, cols].max(1)
+    n = len(rate) // fps
+    return rate[:n * fps].reshape(n, fps).sum(1)
+
+
+def chat_bonus(activity, n_seconds, delay=3):
+    """Activité du chat -> bonus 0..1 par seconde, par rapport aux 5 minutes autour.
+    Le chat réagit quelques secondes après l'action : on avance le signal de `delay` s."""
+    a = np.zeros(n_seconds)
+    m = min(n_seconds, len(activity))
+    a[:m] = activity[:m]
+    a = np.convolve(a, np.ones(5) / 5, mode="same")
+    base = _roll_mean(a, 301)
+    spread = np.percentile(a, 90) - np.percentile(a, 50) + 1e-6
+    z = np.clip((a - base) / spread, 0, 3) / 3
+    if delay:
+        z = np.concatenate([z[delay:], np.zeros(delay)])
+    return z

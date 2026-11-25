@@ -323,6 +323,60 @@ def vod_analysis(cfg, vod_id, vod_url):
     return levels, feats
 
 
+def vod_chat(cfg, vod_id, vod_url, scan=True):
+    """Activité du chat par seconde, si on peut la connaître :
+    1) replay du chat YouTube (live rediffusé avec son chat) ;
+    2) sinon, chat incrusté dans l'image de la rediff (détecté en regardant la vidéo en 144p).
+    Renvoie un tableau numpy ou None. Gardé en cache."""
+    import numpy as np
+    import analyse
+    cache = resolve(cfg.get("work_dir", "work")) / "vodcache"
+    f, none = cache / f"{vod_id}.chat.npy", cache / f"{vod_id}.sanschat"
+    if f.exists():
+        return np.load(f)
+    if none.exists() or not scan or not vod_id.startswith("yt-"):
+        return None                     # Twitch : chat non incrusté et replay non accessible simplement
+    tmp = resolve(cfg.get("work_dir", "work")) / "vodtmp"
+    tmp.mkdir(parents=True, exist_ok=True)
+    act = None
+    try:
+        opts = {**ydl_base_opts(cfg), "skip_download": True, "writesubtitles": True,
+                "subtitleslangs": ["live_chat"], "outtmpl": str(tmp / f"{vod_id}.%(ext)s")}
+        with yt_dlp.YoutubeDL(opts) as y:
+            y.extract_info(vod_url, download=True)
+        chats = list(tmp.glob(f"{vod_id}*.live_chat.json"))
+        if chats:
+            msgs = analyse.parse_youtube_live_chat(chats[0])
+            if len(msgs) > 50:
+                act = analyse.chat_from_messages(msgs, int(max(t for t, _ in msgs)) + 1)
+                log.info("Chat : replay trouvé pour %s (%d messages)", vod_id, len(msgs))
+    except Exception as e:
+        log.debug("Pas de replay du chat pour %s : %s", vod_id, e)
+    if act is None:
+        t0 = time.time()
+        opts = {**ydl_base_opts(cfg), "format": "160/278/394/worstvideo[height>=100]/worstvideo",
+                "outtmpl": str(tmp / f"{vod_id}.video.%(ext)s"), "http_chunk_size": 10 * 1024 * 1024,
+                "retries": 10, "fragment_retries": 10}
+        try:
+            with yt_dlp.YoutubeDL(opts) as y:
+                y.extract_info(vod_url, download=True)
+            vids = [x for x in tmp.glob(f"{vod_id}.video.*") if not x.name.endswith((".part", ".ytdl"))]
+            if vids:
+                act = analyse.video_chat_activity(str(vids[0]))
+                log.info("Chat : %s pour %s (%d s)", "chat incrusté détecté dans la vidéo" if act is not None
+                         else "pas de chat dans la vidéo", vod_id, time.time() - t0)
+        except Exception as e:
+            log.warning("Chat incrusté de %s non analysé : %s", vod_id, e)
+    for x in tmp.glob(f"{vod_id}*"):
+        x.unlink(missing_ok=True)
+    cache.mkdir(parents=True, exist_ok=True)
+    if act is None:
+        none.touch()
+    else:
+        np.save(f, act.astype(np.float32))
+    return act
+
+
 def clean_vodcache(cfg, keep_days=10):
     """Supprime les analyses de lives trop vieux (les exemples d'apprentissage, eux, sont gardés)."""
     cache = resolve(cfg.get("work_dir", "work")) / "vodcache"
@@ -498,10 +552,13 @@ def update_training(cfg, vid, P, positives, length):
              "" if n_pos >= MODEL_MIN_EXAMPLES else f" — utilisé à partir de {MODEL_MIN_EXAMPLES}")
 
 
-def pick_with_model(model, P, length, count, blocked=(), min_gap=120, boosts=(), min_score=0.5):
+def pick_with_model(model, P, length, count, blocked=(), min_gap=120, boosts=(), min_score=0.5, chat=None):
     import analyse
     starts, sc = analyse.scores(model, P, length)
     sc = sc.copy()
+    if chat is not None:              # le chat s'emballe : bonus jusqu'à +0,4
+        for k, s0 in enumerate(starts):
+            sc[k] += 0.4 * float(chat[s0:s0 + length].mean()) if s0 < len(chat) else 0
     for k, s in enumerate(starts):
         if any(s - 15 <= b <= s + length for b in boosts):
             sc[k] += 0.2
@@ -518,7 +575,7 @@ def pick_with_model(model, P, length, count, blocked=(), min_gap=120, boosts=(),
     return sorted(picks)
 
 
-def pick_highlights(levels, length, count, blocked=(), min_gap=120, boosts=(), step=5, min_excess=3.0):
+def pick_highlights(levels, length, count, blocked=(), min_gap=120, boosts=(), step=5, min_excess=3.0, chat=None):
     """Les `count` passages de `length` s les plus « forts » (son au-dessus du niveau habituel du live),
     sans chevaucher les passages déjà pris (`blocked`) ni être à moins de `min_gap` s l'un de l'autre.
     `boosts` : instants où les viewers ont créé des clips (bonus)."""
@@ -530,6 +587,9 @@ def pick_highlights(levels, length, count, blocked=(), min_gap=120, boosts=(), s
     for b in boosts:
         for t in range(max(0, int(b)), min(n, int(b) + 30)):
             score[t] += 8.0
+    if chat is not None:              # chat qui s'emballe : jusqu'à +6 dB équivalents par seconde
+        for t in range(min(n, len(chat))):
+            score[t] += 6.0 * float(chat[t])
     pref = [0.0]
     for v in score:
         pref.append(pref[-1] + v)
@@ -748,12 +808,22 @@ def vod_candidates(cfg, login, vods, clips, state, moments, model, scan=True, ow
                 log.warning("Apprentissage ignoré pour %s : %s", vid, e)
         # 2) Moments forts : modèle appris si assez d'exemples, sinon pics de son
         count, gap = int(vcfg.get("highlights_per_vod", 6)), int(vcfg.get("min_gap_seconds", 120))
+        chat = None
+        if vcfg.get("chat", True) and len(P):
+            try:
+                act = vod_chat(cfg, vid, v["url"], scan)
+                if act is not None:
+                    chat = analyse.chat_bonus(act, len(P))
+            except Exception as e:
+                log.warning("Chat de %s ignoré : %s", vid, e)
         if model and len(P):
-            picks = pick_with_model(model, P, length, count, blocked, gap, boosts)
+            picks = pick_with_model(model, P, length, count, blocked, gap, boosts, chat=chat)
         else:
-            picks = pick_highlights(v["levels"], length, count, blocked, gap, boosts)
+            picks = pick_highlights(v["levels"], length, count, blocked, gap, boosts, chat=chat)
         # 3) Découpage intelligent : le cœur de l'action + un peu de contexte, coupé dans un silence
         ex = analyse.excitement(P, model) if len(P) else None
+        if ex is not None and chat is not None:
+            ex = ex + 2 * (ex.std() + 1e-6) * chat[:len(ex)] if len(chat) >= len(ex) else ex
         for start, end, strength in picks:
             if ex is not None and len(ex) > end:
                 start, end = analyse.refine(start, end, v["feats"], ex, min_len=min(25, length),
