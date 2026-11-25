@@ -17,6 +17,8 @@ sources:
       lookback_hours: 72           # rediffusions de moins de 72 h
       highlights_per_vod: 6        # extraits max par rediffusion
       chat: true                   # analyse le chat (replay YouTube ou chat incrusté dans la rediff)
+      deep_listen: true            # transcrit les meilleurs passages (réactions, rires) avec Whisper
+      deep_max_per_run: 12         # passages écoutés en profondeur par lancement (gardés en cache)
       min_gap_seconds: 120         # écart minimum entre deux extraits du même live
       title_keywords: ["GTA"]      # seulement les lives dont le titre contient un de ces mots (vide = tous)
     channels:

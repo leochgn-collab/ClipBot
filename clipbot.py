@@ -237,6 +237,7 @@ def twitch_candidates(cfg, state=None, scan_vods=True):
         per_channel.append((login, min_views, clips, vods))
     # Les comptes de clippers sont comparés à TOUS les lives (Michou, Squeezie, Inoxtag…) en une fois
     moments = {}
+    _deep_budget["left"] = int(((src.get("vods") or {}).get("deep_max_per_run", 12)))
     if all_vods:
         try:
             moments = clipper_moments(cfg, all_vods, scan_vods)
@@ -828,8 +829,97 @@ def vod_candidates(cfg, login, vods, clips, state, moments, model, scan=True, ow
             if ex is not None and len(ex) > end:
                 start, end = analyse.refine(start, end, v["feats"], ex, min_len=min(25, length),
                                             max_len=length, v=vc)
-            add(start, end, 0, 1 + min(0.99, strength))
+            rank = 1 + min(0.99, strength)
+            # 4) Écoute approfondie : ce qui est dit (réactions, rires) + découpe sur les phrases
+            if vcfg.get("deep_listen", True) and scan:
+                try:
+                    d = deep_listen(cfg, vid, v["url"], start, end, length)
+                except Exception as e:
+                    log.warning("Écoute approfondie ignorée (%s à %ds) : %s", vid, start, e)
+                    d = None
+                if d:
+                    start, end = d["s"], d["e"]
+                    rank = 1 + min(0.99, 0.5 * min(1.0, strength) + 0.49 * d["score"])
+            elif vcfg.get("deep_listen", True):
+                d = deep_cached(cfg, vid, start, end)
+                if d:
+                    start, end = d["s"], d["e"]
+                    rank = 1 + min(0.99, 0.5 * min(1.0, strength) + 0.49 * d["score"])
+            add(start, end, 0, rank)
     return out
+
+
+_deep_budget = {"left": 0}
+
+
+def _deep_file(cfg):
+    return resolve(cfg.get("work_dir", "work")) / "deepcache.json"
+
+
+def deep_cached(cfg, vid, start, end):
+    f = _deep_file(cfg)
+    if not f.exists():
+        return None
+    return json.loads(f.read_text()).get(f"{vid}:{int(start)}:{int(end)}")
+
+
+def deep_listen(cfg, vid, url, start, end, max_len):
+    """Télécharge le passage (+5 s autour), le transcrit avec Whisper et note ce qui est dit.
+    Limité à `deep_max_per_run` passages par lancement ; résultat gardé en cache."""
+    import analyse
+    key = f"{vid}:{int(start)}:{int(end)}"
+    f = _deep_file(cfg)
+    cache = json.loads(f.read_text()) if f.exists() else {}
+    if key in cache:
+        return cache[key]
+    if _deep_budget["left"] <= 0:
+        return None
+    model = _whisper(cfg)
+    if model is None:
+        return None
+    _deep_budget["left"] -= 1
+    a, b = max(0.0, start - 5), end + 5
+    tmp = resolve(cfg.get("work_dir", "work")) / "deeptmp"
+    tmp.mkdir(parents=True, exist_ok=True)
+    name = re.sub(r"[^\w-]", "_", key)
+    fmt = "140/139/bestaudio" if vid.startswith("yt-") else "Audio_Only/audio_only/bestaudio/worst"
+    opts = {**ydl_base_opts(cfg), "format": fmt, "outtmpl": str(tmp / f"{name}.%(ext)s"),
+            "download_ranges": yt_dlp.utils.download_range_func(None, [(a, b)])}
+    t0 = time.time()
+    try:
+        with yt_dlp.YoutubeDL(opts) as y:
+            y.extract_info(url, download=True)
+        files = [x for x in tmp.glob(f"{name}.*") if not x.name.endswith((".part", ".ytdl"))]
+        if not files:
+            return None
+        sub = cfg["video"].get("subtitles") or {}
+        segs, _ = model.transcribe(str(files[0]), language=sub.get("language", "fr"), vad_filter=True,
+                                   word_timestamps=True)
+        words = [(w.start, w.end, w.word) for sg in segs for w in (sg.words or [])]
+    finally:
+        for x in tmp.glob(f"{name}.*"):
+            x.unlink(missing_ok=True)
+    score, det = analyse.speech_score([w for w in words if start - a <= w[0] <= end - a], end - start)
+    s2, e2 = analyse.snap_words(words, start - a, end - a, max_len, min_len=min(15, end - start))
+    res = {"score": score, "s": round(a + s2, 1), "e": round(a + e2, 1),
+           "texte": " ".join(w for _, _, w in words)[:160]}
+    log.info("Écoute approfondie %s à %ds : note %.2f %s (%d s) « %s… »", vid, start, score, det,
+             time.time() - t0, res["texte"][:70])
+    cache[key] = res
+    f.write_text(json.dumps(cache, ensure_ascii=False))
+    return res
+
+
+def _whisper(cfg):
+    global _whisper_model
+    try:
+        from faster_whisper import WhisperModel
+    except ImportError:
+        return None
+    if _whisper_model is None:
+        sub = cfg["video"].get("subtitles") or {}
+        _whisper_model = WhisperModel(sub.get("model", "small"), device="cpu", compute_type="int8")
+    return _whisper_model
 
 
 # --------------------------------------------------------------------------

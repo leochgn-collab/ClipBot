@@ -712,6 +712,8 @@ def settings():
         vd = tw.setdefault("vods", {})
         vd["enabled"] = "vods_on" in f
         vd["chat"] = "vods_chat" in f
+        vd["deep_listen"] = "vods_deep" in f
+        vd["deep_max_per_run"] = max(0, min(int(f.get("vods_deep_max") or 12), 60))
         vd["highlights_per_vod"] = max(1, min(int(f.get("vods_per") or 6), 30))
         vd["max_vods"] = max(1, min(int(f.get("vods_max") or 2), 10))
         vd["min_gap_seconds"] = max(30, min(int(f.get("vods_gap") or 120), 3600))
@@ -819,6 +821,8 @@ def settings():
 <p style="font-size:13px">🧠 {{ model_info }}</p>
 <label><input type="checkbox" name="vods_on" style="width:auto" {{'checked' if (tw.vods or {}).enabled}}> Activer</label>
 <label><input type="checkbox" name="vods_chat" style="width:auto" {{'checked' if (tw.vods or {}).get('chat', True)}}> Analyser aussi le chat (replay du chat YouTube, ou chat incrusté dans la rediff)</label>
+<label><input type="checkbox" name="vods_deep" style="width:auto" {{'checked' if (tw.vods or {}).get('deep_listen', True)}}> Écoute approfondie : transcrire les meilleurs passages (réactions, rires) et couper entre deux phrases</label>
+<label>Passages écoutés en profondeur par lancement</label><input type="number" name="vods_deep_max" min="0" max="60" value="{{ (tw.vods or {}).get('deep_max_per_run', 12) }}">
 <div class="row"><div><label>Extraits max par live</label><input type="number" name="vods_per" min="1" max="30" value="{{(tw.vods or {}).highlights_per_vod or 6}}"></div>
 <div><label>Lives regardés par chaîne</label><input type="number" name="vods_max" min="1" max="10" value="{{(tw.vods or {}).max_vods or 2}}"></div>
 <div><label>Écart entre 2 extraits (s)</label><input type="number" name="vods_gap" min="30" value="{{(tw.vods or {}).min_gap_seconds or 120}}"></div></div>

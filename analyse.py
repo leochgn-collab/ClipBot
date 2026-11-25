@@ -439,3 +439,55 @@ def chat_bonus(activity, n_seconds, delay=3):
     if delay:
         z = np.concatenate([z[delay:], np.zeros(delay)])
     return z
+
+
+# ---------------------------------------------------------------------------
+# Écoute approfondie : ce qui est DIT (transcription Whisper d'un passage)
+# ---------------------------------------------------------------------------
+_REACT = [
+    "c'est pas possible", "pas possible", "oh non", "non non", "regardez", "regarde ça", "oh mon dieu",
+    "mon dieu", "incroyable", "de fou", "c'est fou", "je suis mort", "jsuis mort", "t'es sérieux", "sérieux",
+    "attends attends", "attention", "cours", "vas-y", "vas y", "let's go", "on l'a fait", "c'est quoi ça",
+    "qu'est-ce que", "comment", "wesh", "putain", "bordel", "oh la la", "ohlala", "nan mais", "non mais",
+    "aide-moi", "aidez-moi", "au secours", "il m'a tué", "je suis mort", "gg", "trop fort", "trop drôle",
+    "j'en peux plus", "je pleure", "ça va pas", "ah non", "oh putain", "quoi ?",
+]
+_LAUGH_W = re.compile(r"\b(ha(ha)+|ah(ah)+|hi(hi)+|mdr|ptdr|lol)\b|\(rires?\)|\[rires?\]", re.I)
+
+
+def speech_score(words, duration):
+    """words = [(début, fin, mot)] -> (score 0..1, détails). Mesure les réactions dites :
+    exclamations typiques, rires, mots répétés (« non non non »), débit de parole rapide."""
+    if duration <= 0:
+        return 0.0, {}
+    text = " ".join(w for _, _, w in words).lower()
+    flat = re.sub(r"\s+", " ", text)
+    react = sum(flat.count(p) for p in _REACT)
+    laugh = len(_LAUGH_W.findall(flat))
+    toks = [re.sub(r"[^\wà-ÿ']", "", w.lower()) for _, _, w in words]
+    rep = sum(1 for i in range(2, len(toks)) if toks[i] and toks[i] == toks[i - 1] == toks[i - 2])
+    bangs = flat.count("!") + flat.count("?!")
+    wps = len(words) / duration
+    s = (0.40 * min(1.0, react / max(1.0, duration / 15))
+         + 0.20 * min(1.0, laugh / 2)
+         + 0.15 * min(1.0, (rep + bangs / 2) / 3)
+         + 0.25 * float(np.clip((wps - 1.5) / 2.0, 0, 1)))
+    if len(words) < 5:          # presque personne ne parle
+        s *= 0.5
+    return round(float(min(1.0, s)), 3), {"réactions": react, "rires": laugh, "répétitions": rep,
+                                          "mots/s": round(wps, 2)}
+
+
+def snap_words(words, start, end, max_len, min_len=10):
+    """Recale début/fin sur les phrases : le début juste avant un mot qui suit une pause,
+    la fin juste après un mot suivi d'une pause (pas de phrase coupée). Temps relatifs au fichier."""
+    if len(words) < 3:
+        return start, end
+    gaps_before = [words[0][0]] + [words[i][0] - words[i - 1][1] for i in range(1, len(words))]
+    gaps_after = [words[i + 1][0] - words[i][1] for i in range(len(words) - 1)] + [9.0]
+    starts = [w[0] for i, w in enumerate(words) if gaps_before[i] >= 0.3 and abs(w[0] - start) <= 4]
+    s = min(starts, key=lambda t: abs(t - start)) - 0.2 if starts else start
+    ends = [w[1] for i, w in enumerate(words) if gaps_after[i] >= 0.4 and s + min_len <= w[1] <= s + max_len
+            and abs(w[1] - end) <= 5]
+    e = min(ends, key=lambda t: abs(t - end)) + 0.4 if ends else end
+    return max(0.0, s), min(e, s + max_len)
