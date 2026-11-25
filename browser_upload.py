@@ -259,7 +259,15 @@ class BrowserYouTube:
                     if attempt == 1:
                         page.goto(self.sel["upload_url"], wait_until="domcontentloaded")
                         _pause(3, 5)
-        dialog.first.wait_for(state="visible", timeout=15_000)
+        try:
+            dialog.first.wait_for(state="visible", timeout=15_000)
+        except Exception:
+            body = (page.locator("body").inner_text(timeout=5_000) or "").lower()
+            if "limite quotidienne" in body or "daily upload limit" in body or "limite d'importation" in body:
+                raise RuntimeError("YouTube : limite quotidienne d'importation atteinte (réessai demain). "
+                                   "Valider la chaîne par téléphone dans YouTube Studio augmente la limite.")
+            raise RuntimeError("YouTube Studio n'ouvre pas la fenêtre d'import (bouton « Importer des vidéos » "
+                               "introuvable) : voir la capture youtube-erreur")
 
     def upload(self, path, meta):
         page = self.s.ctx.new_page()
