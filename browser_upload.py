@@ -229,6 +229,38 @@ class BrowserYouTube:
             time.sleep(random.uniform(0.05, 0.2))
         _pause()
 
+    def _open_upload_dialog(self, page):
+        """Studio s'ouvre parfois sur « Contenu de la chaîne » sans la fenêtre d'import :
+        on ferme ce qui gêne et on clique nous-mêmes sur « Importer des vidéos »."""
+        dialog = page.locator("ytcp-uploads-dialog ytcp-uploads-file-picker, ytcp-uploads-file-picker")
+        for attempt in range(3):
+            try:
+                dialog.first.wait_for(state="visible", timeout=10_000)
+                return
+            except Exception:
+                pass
+            page.keyboard.press("Escape")
+            _pause()
+            for sel in ("ytcp-button#upload-button", "#upload-icon", "ytcp-button:has-text('Importer des vidéos')",
+                        "button:has-text('Importer des vidéos')", "text=Importer des vidéos"):
+                btn = page.locator(sel).first
+                try:
+                    if btn.count() and btn.is_visible():
+                        btn.click(timeout=10_000)
+                        break
+                except Exception:
+                    continue
+            else:
+                try:   # menu « Créer » → « Importer des vidéos »
+                    page.locator("#create-icon, ytcp-button:has-text('Créer')").first.click(timeout=10_000)
+                    _pause()
+                    page.locator("tp-yt-paper-item:has-text('Importer'), #text-item-0").first.click(timeout=10_000)
+                except Exception:
+                    if attempt == 1:
+                        page.goto(self.sel["upload_url"], wait_until="domcontentloaded")
+                        _pause(3, 5)
+        dialog.first.wait_for(state="visible", timeout=15_000)
+
     def upload(self, path, meta):
         page = self.s.ctx.new_page()
         try:
@@ -236,8 +268,11 @@ class BrowserYouTube:
             _pause(3, 5)
             if "accounts.google" in page.url:
                 raise RuntimeError("non connecté à YouTube : réexporte tes cookies")
-            page.locator(self.sel["file_input"]).first.set_input_files(str(path))
+            self._open_upload_dialog(page)
+            page.locator("ytcp-uploads-dialog input[type=file], " + self.sel["file_input"]).first \
+                .set_input_files(str(path))
             log.info("YouTube : vidéo envoyée, remplissage des champs…")
+            page.locator(self.sel["title"]).first.wait_for(state="visible", timeout=120_000)
 
             self._fill(page, self.sel["title"], meta["title"])
             self._fill(page, self.sel["description"], meta["description"])
