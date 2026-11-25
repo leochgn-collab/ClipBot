@@ -1708,6 +1708,7 @@ def main():
     ap.add_argument("--only", metavar="ID", help="publie tout de suite ce clip-là (id de l'historique)")
     ap.add_argument("--check-browser", action="store_true",
                     help="vérifie la connexion TikTok/YouTube du navigateur (captures dans screenshots/)")
+    ap.add_argument("--tiktok-qr", action="store_true", help="connexion TikTok par QR code (depuis l'interface)")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
     from logging.handlers import RotatingFileHandler
@@ -1767,6 +1768,17 @@ def _main_body(args):
         try:
             for name, (ok, shot, url) in s.check_logins().items():
                 print(f"{name:8} {'✅ connecté' if ok else '❌ non connecté'}  {url}  ({shot})")
+        finally:
+            s.close()
+        return
+    if args.tiktok_qr:
+        from browser_upload import BrowserSession
+        progress("Connexion TikTok par QR code")
+        s = BrowserSession(cfg["publish"].get("browser") or {}, resolve, resolve("screenshots"))
+        try:
+            work = resolve(cfg.get("work_dir", "work"))
+            work.mkdir(parents=True, exist_ok=True)
+            s.tiktok_qr_login(work / "tiktok_qr.png", work / "tiktok_login.json")
         finally:
             s.close()
         return

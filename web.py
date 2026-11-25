@@ -353,7 +353,7 @@ pre{background:#0a0c10;border:1px solid var(--line);border-radius:8px;padding:12
 <main>{% for m in get_flashed_messages() %}<div class="flash">{{m}}</div>{% endfor %}
 {{ body|safe }}</main>
 {% if session.ok %}<nav class="tabbar" aria-label="Menu">
-{% set more = request.endpoint in ('menu','stats','channels','cookies','media','logs') %}
+{% set more = request.endpoint in ('menu','stats','channels','cookies','media','logs','tiktok_login') %}
 <a href="{{url_for('home')}}" class="{{'on' if request.endpoint=='home'}}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></svg>Accueil</a>
 <a href="{{url_for('available')}}" class="{{'on' if request.endpoint=='available'}}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M10 9l5 3-5 3z"/></svg>Clips</a>
 <a href="{{url_for('history')}}" class="{{'on' if request.endpoint=='history'}}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>Historique</a>
@@ -421,6 +421,7 @@ def menu():
 <div class="card" style="display:flex;flex-direction:column;gap:10px">
 <a class="btn sec" href="{{url_for('stats')}}">📈 Statistiques (ce qui marche)</a>
 <a class="btn sec" href="{{url_for('channels')}}">Chaînes autorisées</a>
+<a class="btn sec" href="{{url_for('tiktok_login')}}">📱 Connexion TikTok (QR code)</a>
 <a class="btn sec" href="{{url_for('cookies')}}">Cookies</a>
 <a class="btn sec" href="{{url_for('media')}}">Captures et aperçus</a>
 <a class="btn sec" href="{{url_for('logs')}}">Logs</a>
@@ -553,6 +554,69 @@ def run():
         start_job(mode if mode in ("dry", "check") else "normal")
         flash("Lancé ! Suis l'avancement dans « Logs ».")
     return redirect(url_for("logs"))
+
+
+def _qr_files():
+    w = resolve(load_cfg().get("work_dir", "work"))
+    return w / "tiktok_qr.png", w / "tiktok_login.json"
+
+
+@app.route("/tiktok-login", methods=["GET", "POST"])
+@login_required
+def tiktok_login():
+    png, st = _qr_files()
+    if request.method == "POST":
+        if job_running() or (BASE / "trigger" / "request").exists():
+            flash("Un passage est en cours : attends qu'il finisse (ou Arrêter), puis réessaie.")
+        else:
+            png.unlink(missing_ok=True)
+            st.parent.mkdir(parents=True, exist_ok=True)
+            st.write_text(json.dumps({"state": "wait", "msg": "Démarrage du navigateur…", "t": time.time()}))
+            start_job("tiktokqr")
+        return redirect(url_for("tiktok_login"))
+    return page("""<h1>Connexion TikTok</h1>
+<div class="card">
+<p>1) Touche <b>Afficher le QR code</b>. 2) Fais une <b>capture d'écran</b> du QR code.
+3) Dans l'app TikTok : <b>Profil → ☰ → icône de scan</b> (en haut), puis l'icône <b>photo</b> pour choisir ta capture
+(ou scanne-le avec un autre appareil). 4) Valide dans TikTok : ClipBot est connecté.</p>
+<p class="mut" style="font-size:13px">Connecte le compte TikTok de RedifStream, pas ton compte perso. Le QR code change toutes les ~2 min : refais une capture s'il a changé.</p>
+<form method="post"><input type="hidden" name="csrf" value="{{csrf_token()}}"><button>📱 Afficher le QR code</button></form>
+<p id="qr-msg" style="margin-top:14px"><b></b></p>
+<img id="qr-img" alt="QR code TikTok" style="display:none;width:260px;max-width:90%;background:#fff;padding:12px;border-radius:12px">
+</div>
+<script>
+let lastT=0;
+function poll(){fetch("{{url_for('tiktok_login_status')}}",{credentials:"same-origin"}).then(r=>r.json()).then(d=>{
+ const m=document.querySelector("#qr-msg b"); m.textContent=d.msg||"";
+ const img=document.getElementById("qr-img");
+ if(d.state==="qr"&&d.png_t&&d.png_t!==lastT){lastT=d.png_t;img.src="{{url_for('tiktok_qr_png')}}?t="+d.png_t;img.style.display="block"}
+ if(d.state==="ok"||d.state==="expired"||d.state==="error"){img.style.display="none"}
+}).catch(()=>{})}
+poll();setInterval(poll,2500);
+</script>""")
+
+
+@app.route("/tiktok-login/status")
+@login_required
+def tiktok_login_status():
+    png, st = _qr_files()
+    try:
+        d = json.loads(st.read_text())
+    except (OSError, ValueError):
+        d = {"state": "none", "msg": ""}
+    d["png_t"] = int(png.stat().st_mtime * 1000) if png.exists() else 0
+    return app.response_class(json.dumps(d), mimetype="application/json")
+
+
+@app.route("/tiktok-login/qr.png")
+@login_required
+def tiktok_qr_png():
+    png, _ = _qr_files()
+    if not png.exists():
+        abort(404)
+    resp = app.response_class(png.read_bytes(), mimetype="image/png")
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 def read_status():
@@ -949,8 +1013,9 @@ def settings():
 <label style="flex:0 0 auto;min-width:200px;margin:0"><input type="checkbox" name="{{p}}_on" style="width:auto" {{'checked' if pub[p].enabled}}> {{n}}</label>
 <select name="{{p}}_method"><option value="browser" {{'selected' if pub[p].method=='browser'}}>via le navigateur</option>
 <option value="api" {{'selected' if pub[p].method=='api'}}>via l'API officielle</option></select></div>{% endfor %}
-<div class="mut" style="font-size:13px;margin:6px 0 10px">Pour ajouter ton compte TikTok : 1) envoie ses cookies dans
-<a href="{{url_for('cookies')}}">Cookies → TikTok</a> (exportés en navigation privée, connecté au compte RedifStream) ;
+<div class="mut" style="font-size:13px;margin:6px 0 10px">Pour ajouter ton compte TikTok : 1) connecte-le avec
+<a href="{{url_for('tiktok_login')}}">📱 Connexion TikTok (QR code)</a>, depuis ton téléphone — ou envoie ses cookies dans
+<a href="{{url_for('cookies')}}">Cookies → TikTok</a> depuis un PC ;
 2) sur l'accueil, « Vérifier les connexions » ; 3) coche TikTok ci-dessus et Enregistrer.
 {% if tiktok_cookies %}<b style="color:var(--ok)">✅ Cookies TikTok présents</b>{% else %}<b style="color:var(--ko)">❌ Cookies TikTok absents</b>{% endif %}</div>
 <label>Lien de ton compte TikTok (bouton « Voir sur TikTok »)</label>

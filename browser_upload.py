@@ -115,6 +115,72 @@ class BrowserSession:
         finally:
             self._pw.stop()
 
+    def tiktok_qr_login(self, out_png, status_file, max_wait=300):
+        """Connexion TikTok par QR code, sans cookies :
+        affiche la page « Se connecter avec un QR code », enregistre le QR en image (mis à jour quand il change)
+        et attend que tu le scannes avec l'app TikTok. La session reste dans le profil du navigateur."""
+        import json as _json
+
+        def status(state, msg=""):
+            status_file.write_text(_json.dumps({"state": state, "msg": msg, "t": time.time()}, ensure_ascii=False))
+
+        def logged():
+            return any(c["name"] == "sessionid" and "tiktok" in c.get("domain", "")
+                       for c in self.ctx.cookies("https://www.tiktok.com"))
+
+        if logged():
+            status("ok", "Déjà connecté à TikTok")
+            return True
+        page = self.ctx.new_page()
+        try:
+            status("wait", "Ouverture de TikTok…")
+            page.goto("https://www.tiktok.com/login/qrcode", wait_until="domcontentloaded")
+            _pause(3, 5)
+            for txt in ("Refuser les cookies optionnels", "Decline optional cookies", "Tout refuser"):
+                try:
+                    page.get_by_text(txt).first.click(timeout=2_000)
+                    break
+                except Exception:
+                    pass
+            deadline = time.time() + max_wait
+            qr_sel = "canvas, img[src^='data:image'], [data-e2e='qr-code'] img, div[class*='qrcode'] img"
+            last = b""
+            while time.time() < deadline:
+                if logged() or "/login" not in page.url:
+                    _pause(2, 3)
+                    if logged():
+                        status("ok", "Connecté à TikTok ✅")
+                        log.info("TikTok : connexion par QR code réussie")
+                        return True
+                # le QR expire au bout de ~2 min : TikTok propose « Actualiser »
+                for txt in ("Actualiser", "Refresh"):
+                    try:
+                        btn = page.get_by_text(txt, exact=True).first
+                        if btn.is_visible():
+                            btn.click(timeout=2_000)
+                    except Exception:
+                        pass
+                try:
+                    qr = page.locator(qr_sel).first
+                    qr.wait_for(state="visible", timeout=10_000)
+                    img = qr.screenshot()
+                    if img != last:
+                        out_png.write_bytes(img)
+                        last = img
+                        status("qr", "Scanne le QR code avec l'app TikTok")
+                except Exception:
+                    self.screenshot(page, "tiktok-qr")
+                    status("wait", "QR code pas encore affiché…")
+                time.sleep(3)
+            status("expired", "Temps écoulé : relance « Afficher le QR code »")
+            return False
+        except Exception as e:
+            self.screenshot(page, "tiktok-qr-erreur")
+            status("error", str(e)[:200])
+            raise
+        finally:
+            page.close()
+
     def screenshot(self, page, name):
         path = self.shots / f"{int(time.time())}-{name}.png"
         try:
