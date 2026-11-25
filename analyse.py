@@ -30,7 +30,7 @@ for _b in range(N_B):
 # ---------------------------------------------------------------------------
 # Lecture du son
 # ---------------------------------------------------------------------------
-def features(source):
+def features(source, progress=None):
     """Lit un fichier ou un flux en une passe (sans le stocker).
     Renvoie (volume dB par seconde, spectre log T×60 à 10 images/s)."""
     p = subprocess.Popen(["ffmpeg", "-nostats", "-loglevel", "error", "-i", source, "-vn", "-ac", "1",
@@ -54,6 +54,8 @@ def features(source):
             spec = np.abs(np.fft.rfft(pad[idx] * win, axis=1)) ** 2
             specs.append(np.log10(spec @ _W + 1e-7).astype(np.float32))
         rest = x[nsec * SR:]
+        if progress and len(levels) // 1800 != (len(levels) - nsec) // 1800:
+            progress(len(levels))            # toutes les 30 min de son analysées
     p.wait()
     if p.returncode not in (0, None) and not levels:
         raise RuntimeError("ffmpeg n'a pas pu lire le son")

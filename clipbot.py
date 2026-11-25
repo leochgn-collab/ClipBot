@@ -287,10 +287,36 @@ def vod_analysis(cfg, vod_id, vod_url):
     if lv.exists() and ft.exists():
         return json.loads(lv.read_text()), np.load(ft).astype(np.float32)
     log.info("Analyse du son de la rediffusion %s (quelques minutes la première fois)…", vod_id)
-    with yt_dlp.YoutubeDL({**ydl_base_opts(cfg), "format": "Audio_Only/audio_only/bestaudio/worst"}) as y:
-        info = y.extract_info(vod_url, download=False)
-    stream = info.get("url") or info["requested_formats"][0]["url"]
-    levels, feats = analyse.features(stream)
+    t0 = time.time()
+    if vod_id.startswith("yt-"):
+        # YouTube bride la lecture directe (≈ temps réel : 4 h pour un live de 4 h).
+        # On télécharge d'abord le son seul en petite qualité (≈ 20 Mo/h), par morceaux, puis on l'analyse.
+        tmp = resolve(cfg.get("work_dir", "work")) / "vodtmp"
+        tmp.mkdir(parents=True, exist_ok=True)
+        for f in tmp.glob(f"{vod_id}.*"):
+            f.unlink(missing_ok=True)
+        opts = {**ydl_base_opts(cfg), "format": "139/249/250/worstaudio/bestaudio",
+                "outtmpl": str(tmp / f"{vod_id}.%(ext)s"), "http_chunk_size": 10 * 1024 * 1024,
+                "concurrent_fragment_downloads": 4, "retries": 10, "fragment_retries": 10}
+        try:
+            with yt_dlp.YoutubeDL(opts) as y:
+                y.extract_info(vod_url, download=True)
+            files = [f for f in tmp.glob(f"{vod_id}.*") if not f.name.endswith((".part", ".ytdl"))]
+            if not files:
+                raise RuntimeError("son du live non téléchargé")
+            log.info("Son du live téléchargé en %d s (%.0f Mo), analyse…", time.time() - t0,
+                     files[0].stat().st_size / 1e6)
+            levels, feats = analyse.features(str(files[0]))
+        finally:
+            for f in tmp.glob(f"{vod_id}.*"):
+                f.unlink(missing_ok=True)
+    else:
+        with yt_dlp.YoutubeDL({**ydl_base_opts(cfg), "format": "Audio_Only/audio_only/bestaudio/worst"}) as y:
+            info = y.extract_info(vod_url, download=False)
+        stream = info.get("url") or info["requested_formats"][0]["url"]
+        levels, feats = analyse.features(
+            stream, lambda n: log.info("… %d min de live analysées (%d s écoulées)", n // 60, time.time() - t0))
+    log.info("Rediffusion %s analysée : %d min de live en %d s", vod_id, len(levels) // 60, time.time() - t0)
     cache.mkdir(parents=True, exist_ok=True)
     lv.write_text(json.dumps(levels))
     np.save(ft, feats.astype(np.float16))
