@@ -425,6 +425,7 @@ def menu():
 <a class="btn sec" href="{{url_for('media')}}">Captures et aperçus</a>
 <a class="btn sec" href="{{url_for('logs')}}">Logs</a>
 <a class="btn sec" href="{{cfg.youtube_url or 'https://www.youtube.com/@redifstream2'}}" target="_blank" rel="noopener">Voir sur YouTube</a>
+{% if cfg.tiktok_url %}<a class="btn sec" href="{{cfg.tiktok_url}}" target="_blank" rel="noopener">Voir sur TikTok</a>{% endif %}
 <form method="post" action="{{url_for('logout')}}"><input type="hidden" name="csrf" value="{{csrf_token()}}"><button class="ko">Déconnexion</button></form>
 </div>
 <p class="mut" style="font-size:13px">Astuce iPhone : dans Safari, Partager → « Sur l'écran d'accueil » pour ouvrir ClipBot comme une appli.</p>""", cfg=load_cfg())
@@ -509,6 +510,7 @@ tick();setInterval(tick,3000);
 {% endif %}
 <form method="post" action="{{url_for('pause')}}"><input type="hidden" name="csrf" value="{{csrf_token()}}"><button class="{{'' if cfg.paused else 'sec'}}">{{ '▶ Reprendre' if cfg.paused else '⏸ Pause' }}</button></form>
 <a class="btn sec" href="{{cfg.youtube_url or 'https://www.youtube.com/@redifstream2'}}" target="_blank" rel="noopener">▶ Voir sur YouTube</a>
+{% if cfg.tiktok_url %}<a class="btn sec" href="{{cfg.tiktok_url}}" target="_blank" rel="noopener">♪ Voir sur TikTok</a>{% endif %}
 </div>{% if cfg.paused %}<p class="err" style="margin:10px 0 0">⏸ En pause : aucune publication automatique. Les essais et « Publier maintenant » marchent toujours.</p>{% endif %}</div>
 <h2>Dernière activité</h2><div class="card">{% include_body %}</div>""".replace(
         "{% include_body %}", HISTORY_TABLE), s=stats, cfg=cfg, rows=last,
@@ -842,6 +844,15 @@ def settings():
         yurl = f.get("youtube_url", "").strip()
         if yurl.startswith("https://www.youtube.com/") or yurl.startswith("https://youtube.com/"):
             cfg["youtube_url"] = yurl
+        turl = f.get("tiktok_url", "").strip()
+        if turl.startswith("@"):
+            turl = "https://www.tiktok.com/" + turl
+        if not turl:
+            cfg.pop("tiktok_url", None)
+        elif re.fullmatch(r"https://(www\.)?tiktok\.com/@[\w.\-]+/?", turl):
+            cfg["tiktok_url"] = turl
+        else:
+            flash("Lien TikTok ignoré : il doit ressembler à https://www.tiktok.com/@tonpseudo")
         ntfy["url"], ntfy["topic"] = f.get("ntfy_url", "").strip(), f.get("ntfy_topic", "").strip()
         if f.get("ntfy_token"):
             ntfy["token"] = f["ntfy_token"].strip()
@@ -938,6 +949,12 @@ def settings():
 <label style="flex:0 0 200px"><input type="checkbox" name="{{p}}_on" style="width:auto" {{'checked' if pub[p].enabled}}> {{n}}</label>
 <select name="{{p}}_method"><option value="browser" {{'selected' if pub[p].method=='browser'}}>via le navigateur</option>
 <option value="api" {{'selected' if pub[p].method=='api'}}>via l'API officielle</option></select></div>{% endfor %}
+<div class="mut" style="font-size:13px;margin:6px 0 10px">Pour ajouter ton compte TikTok : 1) envoie ses cookies dans
+<a href="{{url_for('cookies')}}">Cookies → TikTok</a> (exportés en navigation privée, connecté au compte RedifStream) ;
+2) sur l'accueil, « Vérifier les connexions » ; 3) coche TikTok ci-dessus et Enregistrer.
+{% if tiktok_cookies %}<b style="color:var(--ok)">✅ Cookies TikTok présents</b>{% else %}<b style="color:var(--ko)">❌ Cookies TikTok absents</b>{% endif %}</div>
+<label>Lien de ton compte TikTok (bouton « Voir sur TikTok »)</label>
+<input name="tiktok_url" value="{{cfg.tiktok_url or ''}}" placeholder="https://www.tiktok.com/@redifstream">
 <label>Lien de ta chaîne YouTube (bouton « Voir sur YouTube »)</label>
 <input name="youtube_url" value="{{cfg.youtube_url or 'https://www.youtube.com/@redifstream2'}}">
 <label>Visibilité YouTube</label><select name="yt_privacy">{% for o,l in [('public','Public'),('unlisted','Non répertoriée'),('private','Privée')] %}
@@ -994,6 +1011,7 @@ def settings():
 <p class="mut" style="font-size:13px">Accès réservé à : {{ (cfg.web or {}).allowed_ips|join(', ') if (cfg.web or {}).allowed_ips else 'tout le monde' }} · double authentification : {{ 'activée' if totp_on else 'désactivée' }}.</p></div>""",
                 cfg=cfg, v=v, tw=tw, pub=pub, meta=meta, ntfy=ntfy, logo_ok=logo_path().exists(),
                 model_info=model_info(cfg),
+                tiktok_cookies=resolve((pub.get("browser") or {}).get("tiktok_cookies", "secrets/tiktok_cookies.txt")).exists(),
                 totp_on=TOTP_FILE.exists())
 
 
