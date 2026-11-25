@@ -222,7 +222,12 @@ def twitch_candidates(cfg, state=None, scan_vods=True):
             except Exception as e:  # une rediffusion illisible ne bloque pas les clips
                 log.error("Rediffusions de %s : %s", login, e)
             rediffs = ch.get("rediffs") if isinstance(ch, dict) else None
-            if rediffs and not vods:      # rien de lisible sur Twitch -> rediffs YouTube
+            if not vods and not rediffs:  # pas de lien donné : on cherche la chaîne de rediffs tout seul
+                try:
+                    rediffs = discover_rediffs(cfg, login, scan_vods)
+                except Exception as e:
+                    log.warning("Recherche des rediffs de %s : %s", login, e)
+            if rediffs and rediffs != "non" and not vods:      # rien de lisible sur Twitch -> rediffs YouTube
                 try:
                     vods = youtube_rediffs(cfg, rediffs, login, scan_vods)
                 except Exception as e:
@@ -544,6 +549,54 @@ def collect_vods(cfg, tw, login, scan=True):
             continue
         vods[v["id"]] = {**v, "levels": levels, "feats": feats, "login": login}
     return vods
+
+
+def _norm(text):
+    import unicodedata
+    t = unicodedata.normalize("NFKD", text or "").encode("ascii", "ignore").decode().lower()
+    return re.sub(r"[^a-z0-9]", "", t)
+
+
+def discover_rediffs(cfg, login, scan=True):
+    """Trouve tout seul la chaîne YouTube où un streamer republie ses lives complets.
+    Cherche sur YouTube « <pseudo> rediffusion live »… et garde la chaîne dont le nom contient le pseudo
+    et qui publie des vidéos longues (lives). Résultat gardé 7 jours (ou pour toujours s'il est trouvé)."""
+    f = resolve(cfg.get("work_dir", "work")) / "rediffs_auto.json"
+    data = json.loads(f.read_text()) if f.exists() else {}
+    e = data.get(login)
+    if e and (e.get("url") or time.time() - e.get("t", 0) < 7 * 86400):
+        return e.get("url")
+    if not scan:
+        return None
+    key = _norm(login)
+    cands = {}
+    for q in (f"{login} rediffusion live", f"{login} rediff live complet", f"{login} live twitch vod"):
+        try:
+            with yt_dlp.YoutubeDL({**ydl_base_opts(cfg), "extract_flat": True}) as y:
+                res = y.extract_info(f"ytsearch20:{q}", download=False)
+        except Exception as ex:
+            log.warning("Recherche YouTube « %s » impossible : %s", q, ex)
+            continue
+        for v in res.get("entries") or []:
+            name, cid = v.get("channel") or v.get("uploader") or "", v.get("channel_id")
+            if not cid or key not in _norm(name):
+                continue
+            c = cands.setdefault(cid, {"name": name, "long": 0,
+                                       "kw": bool(re.search(r"redif|replay|vod|live|stream", _norm(name)))})
+            if (v.get("duration") or 0) >= 2700:
+                c["long"] += 1
+    good = [(c["kw"], c["long"], cid) for cid, c in cands.items() if c["long"] >= 2]
+    url = name = None
+    if good:
+        cid = max(good)[2]
+        url, name = f"https://www.youtube.com/channel/{cid}", cands[cid]["name"]
+        log.info("Rediffs YouTube trouvées automatiquement pour %s : « %s » (%s)", login, name, url)
+    else:
+        log.info("Pas de chaîne YouTube de rediffs trouvée pour %s (nouvel essai dans 7 jours)", login)
+    data[login] = {"url": url, "name": name, "t": time.time()}
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps(data, ensure_ascii=False))
+    return url
 
 
 def youtube_rediffs(cfg, url, login, scan=True):

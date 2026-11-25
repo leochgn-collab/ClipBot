@@ -197,6 +197,14 @@ def start_job(mode):
     tmp.rename(trig / "request")
 
 
+def auto_rediffs(cfg):
+    try:
+        f = resolve(cfg.get("work_dir", "work")) / "rediffs_auto.json"
+        return json.loads(f.read_text()) if f.exists() else {}
+    except Exception:
+        return {}
+
+
 def model_info(cfg):
     try:
         import clipbot
@@ -630,7 +638,9 @@ def channels():
                 rd = (rediffs[k] if k < len(rediffs) else "").strip()
                 if rd.startswith("@"):
                     rd = "https://www.youtube.com/" + rd
-                if re.fullmatch(r"https://(www\.|m\.)?youtube\.com/(@[\w.\-]+|channel/[\w\-]+|c/[\w.\-]+)(/videos|/streams)?/?", rd):
+                if rd.lower() in ("non", "aucune"):
+                    row["rediffs"] = "non"
+                elif re.fullmatch(r"https://(www\.|m\.)?youtube\.com/(@[\w.\-]+|channel/[\w\-]+|c/[\w.\-]+)(/videos|/streams)?/?", rd):
                     row["rediffs"] = rd
                 tw_list.append(row)
         yt_list = []
@@ -651,8 +661,9 @@ def channels():
 <div id="tw">{% for c in tw_rows + [{}] %}<div class="row" style="margin-bottom:6px">
 <input name="tw_login" placeholder="pseudo Twitch" value="{{c.login or ''}}">
 <input name="tw_min" placeholder="vues min. (défaut {{tw.min_views or 0}})" value="{{c.min_views or ''}}" style="max-width:220px">
-<input name="tw_rediff" placeholder="chaîne YouTube des rediffs (ex. @MichouRediffs)" value="{{c.rediffs or ''}}"></div>{% endfor %}</div>
-<p class="mut" style="font-size:13px">Rediffs YouTube : utilisées quand les rediffusions Twitch sont absentes ou réservées aux abonnés. ClipBot y cherche les moments forts et les passages des clippers comme sur Twitch.</p>
+<input name="tw_rediff" placeholder="{{ ('trouvée auto : ' ~ auto[c.login].name) if c.login and auto.get(c.login, {}).get('url') else 'rediffs YouTube : auto (ou lien, ou « non »)' }}" value="{{c.rediffs or ''}}"></div>{% endfor %}</div>
+<p class="mut" style="font-size:13px">Ajoute juste le pseudo : ClipBot regarde Twitch, et si les rediffusions y sont absentes ou réservées aux abonnés, il cherche tout seul la chaîne YouTube où le streamer republie ses lives (le nom trouvé s'affiche dans le champ). Tu peux aussi coller le lien toi-même, ou écrire « non » pour ne pas utiliser YouTube.</p>
+{% for login, a in auto.items() if a.url %}<p class="mut" style="font-size:12px;margin:2px 0">🔎 {{login}} → <a href="{{a.url}}" target="_blank" rel="noopener">{{a.name}}</a></p>{% endfor %}
 <button type="button" class="sec sm" onclick="add('tw')">+ Ajouter</button></div>
 <div class="card"><h2 style="margin-top:0">YouTube <label style="display:inline;margin-left:10px"><input type="checkbox" name="yt_on" style="width:auto" {{'checked' if yt.enabled}}> activé</label></h2>
 <div id="yt">{% for c in yt_rows + [{}] %}<div class="row" style="margin-bottom:6px">
@@ -663,7 +674,7 @@ def channels():
 <button>Enregistrer</button></form>
 <script>function add(id){const box=document.getElementById(id),r=box.lastElementChild.cloneNode(true);
 r.querySelectorAll('input').forEach(i=>i.value='');box.appendChild(r)}</script>""",
-                tw=tw, yt=yt, tw_rows=tw_rows, yt_rows=yt_rows)
+                tw=tw, yt=yt, tw_rows=tw_rows, yt_rows=yt_rows, auto=auto_rediffs(cfg))
 
 
 # --------------------------------------------------------------------------
