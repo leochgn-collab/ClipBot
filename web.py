@@ -946,7 +946,7 @@ def settings():
 
 <div class="card"><h2 style="margin-top:0">Publication</h2>
 {% for p,n in [('youtube','YouTube Shorts'),('tiktok','TikTok')] %}<div class="row" style="margin-bottom:8px">
-<label style="flex:0 0 200px"><input type="checkbox" name="{{p}}_on" style="width:auto" {{'checked' if pub[p].enabled}}> {{n}}</label>
+<label style="flex:0 0 auto;min-width:200px;margin:0"><input type="checkbox" name="{{p}}_on" style="width:auto" {{'checked' if pub[p].enabled}}> {{n}}</label>
 <select name="{{p}}_method"><option value="browser" {{'selected' if pub[p].method=='browser'}}>via le navigateur</option>
 <option value="api" {{'selected' if pub[p].method=='api'}}>via l'API officielle</option></select></div>{% endfor %}
 <div class="mut" style="font-size:13px;margin:6px 0 10px">Pour ajouter ton compte TikTok : 1) envoie ses cookies dans
