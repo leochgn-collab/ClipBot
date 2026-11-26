@@ -1414,7 +1414,7 @@ def hook_text(work, cfg):
     """Phrase d'accroche affichée en gros pendant 2,5 s : la réplique la plus forte des sous-titres,
     sinon le texte de secours des réglages."""
     h = (cfg["video"].get("hook") or {})
-    if not h.get("enabled", True) or not h.get("text", True):
+    if not h.get("enabled", True) or not h.get("text_banner", False):   # bandeau texte : désactivé par défaut
         return None
     best, _ = best_quote(work)
     if best:
@@ -2010,6 +2010,7 @@ def _process(cfg, state, candidates, budget, yt, tt, dry_run):
                 c["quote"] = None
             try:
                 hk = hook_text(work, cfg) if subs or (cfg["video"].get("hook") or {}).get("fallback") else None
+                (work / "hook.txt").unlink(missing_ok=True)
                 if hk:
                     (work / "hook.txt").write_text(hk, encoding="utf-8")
                     log.info("Accroche : %s", hk)

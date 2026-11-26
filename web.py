@@ -1000,7 +1000,8 @@ def settings():
         vd["chat"] = "vods_chat" in f
         vd["deep_listen"] = "vods_deep" in f
         hk = v.setdefault("hook", {})
-        hk["enabled"], hk["teaser"], hk["text"] = "hook_on" in f, "hook_teaser" in f, "hook_text" in f
+        hk["enabled"], hk["teaser"], hk["text_banner"] = "hook_on" in f, "hook_teaser" in f, "hook_text" in f
+        hk.pop("text", None)
         hk["fallback"] = f.get("hook_fallback", "").strip()[:44]
         vd["follow_trends"] = "vods_trends" in f
         vd["deep_max_per_run"] = max(0, min(int(f.get("vods_deep_max") or 12), 60))
@@ -1169,7 +1170,7 @@ def settings():
 {% set hk = v.hook or {} %}
 <label><input type="checkbox" name="hook_on" style="width:auto" {{'checked' if hk.get('enabled', True)}}> Activer l'accroche</label>
 <label><input type="checkbox" name="hook_teaser" style="width:auto" {{'checked' if hk.get('teaser', True)}}> Teaser : montrer d'abord les ~3 s les plus fortes, puis repartir du début</label>
-<label><input type="checkbox" name="hook_text" style="width:auto" {{'checked' if hk.get('text', True)}}> Afficher en gros la réplique la plus forte pendant 2,5 s</label>
+<label><input type="checkbox" name="hook_text" style="width:auto" {{'checked' if hk.get('text_banner', False)}}> Bandeau jaune avec la réplique la plus forte pendant 2,5 s (désactivé par défaut)</label>
 <label>Texte de secours (si aucune réplique forte, vide = rien)</label><input name="hook_fallback" maxlength="44" value="{{hk.fallback or ''}}" placeholder="REGARDE JUSQU'À LA FIN"></div>
 
 <div class="card"><h2 style="margin-top:0">Sous-titres et qualité</h2><div class="row">
