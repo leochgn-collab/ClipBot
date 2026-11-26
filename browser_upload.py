@@ -212,6 +212,21 @@ class BrowserTikTok:
 
     def _dismiss_popups(self, page, hard=False):
         """Ferme les bulles « nouveautés », la vérification du contenu, les bandeaux… qui gênent les clics."""
+        # Fenêtre « Activer les vérifications automatiques du contenu ? » : on répond « Annuler »
+        # (aucun réglage du compte n'est changé ; la vidéo est publiée normalement)
+        for kw in ("vérifications automatiques", "automatic content check", "Vérifications du contenu"):
+            try:
+                box = page.locator(f"div[role='dialog']:has-text('{kw}'), div[class*='Modal']:has-text('{kw}')").first
+                if box.count() and box.is_visible():
+                    for name in ("Annuler", "Cancel", "Plus tard", "Not now"):
+                        btn = box.get_by_role("button", name=name, exact=True).first
+                        if btn.count() and btn.is_visible():
+                            btn.click(timeout=3_000)
+                            log.info("TikTok : fenêtre « vérifications automatiques » fermée (%s)", name)
+                            _pause(0.5, 1)
+                            break
+            except Exception:
+                pass
         for txt in ("Compris", "J'ai compris", "Got it", "OK", "Plus tard", "Pas maintenant", "Not now",
                     "Ignorer", "Skip", "Fermer", "Close"):
             try:
