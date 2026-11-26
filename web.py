@@ -222,13 +222,29 @@ def model_info(cfg):
 
 
 def tail(path, n=200):
+    """Les n dernières lignes, en ne lisant que la fin du fichier (rapide même si le log est gros)."""
     if not path.exists():
         return ""
-    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    return "\n".join(lines[-n:])
+    with open(path, "rb") as fh:
+        fh.seek(0, 2)
+        size = fh.tell()
+        fh.seek(max(0, size - 200 * n))
+        data = fh.read().decode("utf-8", errors="replace")
+    return "\n".join(data.splitlines()[-n:])
+
+
+_timer_cache = {"t": 0, "v": None}
 
 
 def timer_info():
+    if _timer_cache["v"] is not None and time.time() - _timer_cache["t"] < 30:
+        return _timer_cache["v"]
+    _timer_cache["v"] = _timer_info()
+    _timer_cache["t"] = time.time()
+    return _timer_cache["v"]
+
+
+def _timer_info():
     try:
         nxt = subprocess.run(["systemctl", "show", "clipbot.timer", "-p",
                               "NextElapseUSecRealtime", "--value"],
@@ -359,7 +375,21 @@ pre{background:#0a0c10;border:1px solid var(--line);border-radius:8px;padding:12
 <a href="{{url_for('history')}}" class="{{'on' if request.endpoint=='history'}}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>Historique</a>
 <a href="{{url_for('settings')}}" class="{{'on' if request.endpoint=='settings'}}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>Réglages</a>
 <a href="{{url_for('menu')}}" class="{{'on' if more}}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></svg>Plus</a>
-</nav>{% endif %}</body></html>"""
+</nav>{% endif %}
+<div id="ld" style="position:fixed;top:0;left:0;height:3px;width:0;background:var(--acc);z-index:99;transition:width 8s cubic-bezier(.1,.7,.1,1)"></div>
+<script>
+(function(){
+ const pre=new Set();
+ function prefetch(a){ if(!a||!a.href||a.target||a.href.indexOf(location.origin)!==0||pre.has(a.href)) return;
+   pre.add(a.href); const l=document.createElement("link"); l.rel="prefetch"; l.href=a.href; document.head.appendChild(l); }
+ document.addEventListener("touchstart",e=>prefetch(e.target.closest("a")),{passive:true});
+ document.addEventListener("mouseover",e=>prefetch(e.target.closest("a")),{passive:true});
+ function go(){ const b=document.getElementById("ld"); b.style.width="85%"; }
+ document.addEventListener("click",e=>{const a=e.target.closest("a"); if(a&&a.href&&!a.target&&a.href.indexOf(location.origin)===0&&!e.metaKey) go();});
+ document.addEventListener("submit",e=>{ go(); const b=e.target.querySelector("button"); if(b){ b.disabled=true; b.style.opacity=.6; } });
+ window.addEventListener("pageshow",()=>{document.getElementById("ld").style.width="0"});
+})();
+</script></body></html>"""
 
 
 def page(tpl, **ctx):
@@ -743,10 +773,21 @@ def available():
     cfg = load_cfg()
     error, queue = None, []
     import clipbot
+    snap_f = resolve(cfg.get("work_dir", "work")) / "file_snapshot.json"
+    fresh = request.args.get("actualiser") == "1"
     try:
         st = clipbot.State(resolve(cfg.get("state_db", "clipbot.db")))
-        # scan_vods=False : seulement ce qui est déjà analysé (sinon la page mettrait des minutes)
-        cands = clipbot.twitch_candidates(cfg, st, scan_vods=False)
+        cands = None
+        if not fresh and snap_f.exists() and time.time() - snap_f.stat().st_mtime < 3600:
+            try:
+                cands = json.loads(snap_f.read_text())   # liste gardée par le dernier passage : immédiat
+            except ValueError:
+                cands = None
+        if cands is None:
+            # scan_vods=False : seulement ce qui est déjà analysé (sinon la page mettrait des minutes)
+            cands = clipbot.twitch_candidates(cfg, st, scan_vods=False)
+            snap_f.parent.mkdir(parents=True, exist_ok=True)
+            snap_f.write_text(json.dumps(cands, ensure_ascii=False, default=str))
         try:
             perf = json.loads((resolve(cfg.get("work_dir", "work")) / "performances.json").read_text()).get("effects") or {}
         except (OSError, ValueError):
@@ -762,7 +803,8 @@ def available():
     kinds = clipbot.KIND_NAMES
     return page("""<h1>File d'attente</h1>
 <p class="mut">Les prochains Shorts, dans l'ordre où ClipBot les publiera (un à chaque passage). ⬆ met un clip en tête,
-✖ le retire, « Publier maintenant » le publie tout de suite (sans tenir compte des limites).</p>
+✖ le retire, « Publier maintenant » le publie tout de suite (sans tenir compte des limites).
+<a href="{{url_for('available', actualiser=1)}}">↻ Actualiser</a></p>
 {% if error %}<div class="card err">Impossible de lire Twitch : {{error}}</div>{% endif %}
 <div class="card">{% if queue %}<table><tr><th>#</th><th>Streamer</th><th>Titre</th><th>Type</th><th></th></tr>
 {% for r in queue[:40] %}<tr><td>{{loop.index}}{% if r.source_id in top %} ⭐{% endif %}</td><td>{{r.channel}}</td>
@@ -1356,7 +1398,7 @@ def main():
                       PERMANENT_SESSION_LIFETIME=7 * 86400, MAX_CONTENT_LENGTH=2 * 1024 * 1024)
     from waitress import serve
     print(f"ClipBot web sur http://{args.host}:{args.port}")
-    serve(app, host=args.host, port=args.port, threads=4)
+    serve(app, host=args.host, port=args.port, threads=8, channel_timeout=30)
 
 
 if __name__ == "__main__":

@@ -10,6 +10,9 @@ WorkingDirectory=/opt/clipbot
 ExecStart=/usr/bin/xvfb-run -a /opt/clipbot/venv/bin/python /opt/clipbot/clipbot.py -c /opt/clipbot/config.yaml
 TimeoutStartSec=2h
 Nice=10
+# laisse la priorité à l interface web pendant les analyses
+CPUWeight=20
+IOWeight=20
 Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/clipbot/ms-playwright
 UMask=0077
 # Durcissement (Chromium a besoin du reste)

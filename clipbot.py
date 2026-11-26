@@ -1855,6 +1855,11 @@ def run(cfg, dry_run=False, only=None, force=False):
         except Exception as e:
             log.warning("Statistiques ignorées : %s", e)
     candidates = twitch_candidates(cfg, state) + youtube_candidates(cfg)
+    try:   # image de la file pour l'interface (page File d'attente instantanée)
+        f = resolve(cfg.get("work_dir", "work")) / "file_snapshot.json"
+        f.write_text(json.dumps([c for c in candidates if c["platform"] != "youtube"], ensure_ascii=False, default=str))
+    except (OSError, TypeError):
+        pass
     apply_perf(candidates, perf)
     if only:
         # « Publier maintenant » : ce clip-là seulement, sauf s'il est déjà publié

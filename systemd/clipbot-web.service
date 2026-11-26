@@ -8,6 +8,9 @@ WorkingDirectory=/opt/clipbot
 Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/clipbot/ms-playwright
 ExecStart=/opt/clipbot/venv/bin/python /opt/clipbot/web.py --port 8080
 Restart=on-failure
+# reste fluide même quand ClipBot analyse un live
+CPUWeight=500
+IOWeight=500
 UMask=0077
 # Durcissement
 NoNewPrivileges=yes
