@@ -1298,6 +1298,87 @@ def _srt_to_ass(srt_path, ass_path, fontname, accent_hex):
         + "\n".join(events) + "\n", encoding="utf-8")
 
 
+# --------------------------------------------------------------------------
+# Accroche dès la 1re seconde
+# --------------------------------------------------------------------------
+def make_teaser(src, work, cfg):
+    """« Cold open » : les ~3 s les plus fortes de l'extrait sont montrées tout au début,
+    puis la vidéo repart du début. Les 2 premières secondes décident si les gens restent."""
+    import numpy as np
+    import analyse
+    h = (cfg["video"].get("hook") or {})
+    if not h.get("enabled", True) or not h.get("teaser", True):
+        return src, 0.0
+    levels, _ = analyse.features(str(src))
+    n = len(levels)
+    if n < 12:
+        return src, 0.0
+    lv = np.convolve(np.asarray(levels, float), np.ones(2) / 2, mode="same")
+    peak = 4 + int(np.argmax(lv[4:n - 2]))
+    if peak < 7 or lv[peak] - np.median(lv) < 4:      # déjà au début, ou pas de vrai pic : pas de teaser
+        return src, 0.0
+    a, b = max(0.0, peak - 1.4), min(float(n), peak + 1.6)
+    t_len = b - a
+    keep = min(float(n), float(cfg["video"]["max_duration"]) - t_len)
+    out = work / "hooked.mp4"
+    g = (f"[0:v]trim=start={a}:end={b},setpts=PTS-STARTPTS[tv];[0:a]atrim=start={a}:end={b},asetpts=PTS-STARTPTS[ta];"
+         f"[0:v]trim=start=0:end={keep},setpts=PTS-STARTPTS[mv];[0:a]atrim=start=0:end={keep},asetpts=PTS-STARTPTS[ma];"
+         "[tv][ta][mv][ma]concat=n=2:v=1:a=1[v][a]")
+    try:
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", src.name, "-filter_complex", g,
+                        "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+                        "-c:a", "aac", "-b:a", "192k", out.name], cwd=work, check=True)
+    except subprocess.CalledProcessError as e:
+        log.warning("Teaser impossible (%s) : vidéo sans teaser", e)
+        return src, 0.0
+    log.info("Accroche : teaser de %.1f s (pic à %d s) placé au début", t_len, peak)
+    return out, t_len
+
+
+def hook_text(work, cfg):
+    """Phrase d'accroche affichée en gros pendant 2,5 s : la réplique la plus forte des sous-titres,
+    sinon le texte de secours des réglages."""
+    import analyse
+    h = (cfg["video"].get("hook") or {})
+    if not h.get("enabled", True) or not h.get("text", True):
+        return None
+    best, best_s = None, 0.0
+    srt = work / "subs.srt"
+    if srt.exists():
+        for block in srt.read_text(encoding="utf-8").strip().split("\n\n"):
+            lines = block.strip().splitlines()
+            if len(lines) < 3:
+                continue
+            txt = " ".join(lines[2:]).strip()
+            words = [(i * 0.3, i * 0.3 + 0.25, w) for i, w in enumerate(txt.split())]
+            sc, _ = analyse.speech_score(words, max(1.0, len(words) * 0.3))
+            if 2 <= len(words) <= 9 and sc > best_s:
+                best, best_s = txt, sc
+    if best and best_s >= 0.15:
+        t = best.upper().rstrip(".")
+        return ("« " + t + " »")[:44]
+    fb = (h.get("fallback") or "").strip()
+    return fb[:44] or None
+
+
+def _hook_filter(work, font, accent, y):
+    """drawtext de la phrase d'accroche (fichier texte : pas de souci d'échappement)."""
+    txt = (work / "hook.txt")
+    if not txt.exists():
+        return ""
+    words, lines, cur = txt.read_text(encoding="utf-8").split(), [], ""
+    for w in words:                      # 2 lignes de ~22 caractères max
+        if len(cur) + len(w) + 1 > 22 and cur:
+            lines.append(cur); cur = w
+        else:
+            cur = (cur + " " + w).strip()
+    lines.append(cur)
+    txt.write_text("\n".join(lines[:2]), encoding="utf-8")
+    return (f",drawtext=fontfile='{font}':expansion=none:textfile=hook.txt:fontsize=58:fontcolor=black:"
+            f"box=1:boxcolor=0x{accent}:boxborderw=22:line_spacing=10:x=(w-text_w)/2:y={y}:"
+            "enable='lt(t,2.6)'")
+
+
 def render_bandeau(src, work, cfg, with_subs):
     """Design A : fond noir, logo + « ABONNEZ-VOUS ET LIKEZ ! » en haut, gameplay encadré
     de jaune au centre, sous-titres en dessous, pied de page discret."""
@@ -1329,7 +1410,8 @@ def render_bandeau(src, work, cfg, with_subs):
     g += (f"[{last}]drawtext=fontfile='{font}':expansion=none:text='{line1}':fontsize=57:fontcolor=white:x={tx}:y=190,"
           f"drawtext=fontfile='{font}':expansion=none:text='{line2}':fontsize=57:fontcolor=0x{accent}:x={tx}:y=262,"
           f"drawtext=fontfile='{font}':expansion=none:text='{footer}':fontsize=34:fontcolor=0x9AA1AE:"
-          "x=(w-text_w)/2:y=1440,format=yuv420p")
+          "x=(w-text_w)/2:y=1440"
+          + _hook_filter(work, font, accent, 640) + ",format=yuv420p")
     if with_subs and (work / "subs.srt").exists():
         fontname = "Rubik Mono One" if font != FONT_FALLBACK else "DejaVu Sans"
         _srt_to_ass(work / "subs.srt", work / "subs.ass", fontname, accent)
@@ -1370,7 +1452,9 @@ def render(src, work, cfg, with_subs):
         graph += (f"[1:v]scale={width}:-1,format=rgba,colorchannelmixer=aa={opacity}[lg];"
                   f"[base][lg]overlay=(W-w)/2:{y}[withlogo];")
         last = "withlogo"
-    graph += f"[{last}]format=yuv420p"
+    bfont = resolve((v.get("bandeau") or {}).get("font", "assets/fonts/RubikMonoOne-Regular.ttf"))
+    bfont = str(bfont) if bfont.exists() else FONT_FALLBACK
+    graph += f"[{last}]null{_hook_filter(work, bfont, 'FFD21F', 330)},format=yuv420p"
     if with_subs:
         graph += (",subtitles=subs.srt:force_style='FontName=DejaVu Sans,FontSize=16,Bold=1,"
                   "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,"
@@ -1789,11 +1873,22 @@ def _process(cfg, state, candidates, budget, yt, tt, dry_run):
         try:
             src = download(c, work, cfg)
             try:
+                src, _teaser = make_teaser(src, work, cfg)      # accroche : le moment fort d'abord
+            except Exception as e:
+                log.warning("Teaser ignoré : %s", e)
+            try:
                 progress("Sous-titres", f"{c['channel']} — {c['title'][:60]}")
                 subs = transcribe(src, work / "subs.srt", cfg)
             except Exception as e:  # les sous-titres ne doivent jamais bloquer un clip
                 log.warning("Sous-titres impossibles (%s), clip publié sans", e)
                 subs = False
+            try:
+                hk = hook_text(work, cfg) if subs or (cfg["video"].get("hook") or {}).get("fallback") else None
+                if hk:
+                    (work / "hook.txt").write_text(hk, encoding="utf-8")
+                    log.info("Accroche : « %s »", hk)
+            except Exception as e:
+                log.warning("Texte d'accroche ignoré : %s", e)
             progress("Montage de la vidéo", f"{c['channel']} — {c['title'][:60]}")
             final = render(src, work, cfg, subs)
             meta = build_meta(cfg, c)

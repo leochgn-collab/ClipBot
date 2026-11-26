@@ -46,6 +46,11 @@ sources:
         name: NomDeLaChaine
 
 video:
+  hook:                            # accroche dès la 1re seconde
+    enabled: true
+    teaser: true                   # montre d'abord les ~3 s les plus fortes, puis repart du début
+    text: true                     # réplique la plus forte en gros pendant 2,5 s
+    fallback: ""                   # texte si aucune réplique forte (ex. « REGARDE JUSQU'À LA FIN »)
   max_duration: 59                 # secondes
   layout: bandeau                  # bandeau = design A ; flou = ancien fond flou
   bandeau:
