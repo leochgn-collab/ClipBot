@@ -1266,18 +1266,97 @@ def download(c, work, cfg):
     opts = {
         **ydl_base_opts(cfg),
         "outtmpl": str(work / "source.%(ext)s"),
-        "format": "bv*[height<=1080]+ba/b[height<=1080]/b",
+        # meilleure image jusqu'en 1080p : 60 i/s et plus gros débit d'abord
+        "format": "bv*[height<=1080]+ba/b[height<=1080]/bv*+ba/b",
+        "format_sort": ["res:1080", "fps", "vbr", "tbr"],
         "merge_output_format": "mp4",
     }
     if c.get("start") is not None:
-        opts["download_ranges"] = yt_dlp.utils.download_range_func(None, [(c["start"], c["end"])])
-        opts["force_keyframes_at_cuts"] = True
+        # Coupe SANS réencodage (pas de perte) avec 6 s de marge ; la coupe exacte est faite ensuite,
+        # en recalant l'extrait sur le son du live (précision 0,1 s)
+        a = max(0.0, float(c["start"]) - 6)
+        opts["download_ranges"] = yt_dlp.utils.download_range_func(None, [(a, float(c["end"]) + 6)])
+        c["_dl_from"] = a
     with yt_dlp.YoutubeDL(opts) as y:
         y.download([c["url"]])
     files = sorted(work.glob("source.*"), key=lambda p: p.stat().st_size, reverse=True)
     if not files:
         raise RuntimeError("téléchargement vide")
+    if c.get("start") is not None:
+        return exact_cut(c, files[0], work, cfg)
     return files[0]
+
+
+def video_fps(path):
+    try:
+        r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                            "stream=avg_frame_rate", "-of", "csv=p=0", str(path)],
+                           capture_output=True, text=True, timeout=30).stdout.strip()
+        a, b = r.split("/") if "/" in r else (r, "1")
+        return float(a) / float(b or 1)
+    except Exception:
+        return 30.0
+
+
+def exact_cut(c, src, work, cfg):
+    """La copie sans réencodage commence sur une image clé (quelques secondes avant).
+    On retrouve où elle commence vraiment en comparant son son à celui du live, puis on coupe pile."""
+    import numpy as np
+    import analyse
+    want_from = float(c["start"])
+    dl_from = float(c.get("_dl_from", want_from))
+    offset = want_from - dl_from                       # valeur par défaut si le recalage échoue
+    vid = c["source_id"].split(":")[1] if c["source_id"].startswith("vod:") else None
+    npy = resolve(cfg.get("work_dir", "work")) / "vodcache" / f"{vid}.s60.npy"
+    if vid and npy.exists():
+        try:
+            F = np.load(npy).astype(np.float32)
+            _, Fc = analyse.features(str(src))
+            a = max(0, int((dl_from - 15) * analyse.FPS))
+            ix = analyse.VodIndex(F[a:int((want_from + 25) * analyse.FPS)])
+            q = Fc[:12 * analyse.FPS]
+            Wq = analyse._whiten(q)
+            best = (-1.0, None)
+            for p in ix.coarse(analyse._groups(Wq), 5):
+                sc, pos = ix.verify(Wq, p, 0)
+                if sc > best[0]:
+                    best = (sc, pos)
+            if best[1] is not None and best[0] >= 0.35:
+                real_from = (a + best[1]) / analyse.FPS
+                offset = want_from - real_from
+                log.debug("Recalage : l'extrait commence à %.1f s (demandé %.1f s)", real_from, want_from)
+        except Exception as e:
+            log.debug("Recalage impossible (%s)", e)
+    offset = max(0.0, offset)
+    dur = float(c["end"]) - want_from
+    out = work / "cut.mp4"
+    q = quality_profile(cfg)
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{offset:.2f}", "-i", src.name, "-t", f"{dur:.2f}",
+                    "-c:v", "libx264", "-preset", "fast", "-crf", str(q["inter_crf"]),
+                    "-c:a", "aac", "-b:a", "256k", out.name], cwd=work, check=True)
+    return out
+
+
+def quality_profile(cfg):
+    """Réglages d'encodage selon Réglages → Qualité vidéo."""
+    v = cfg["video"]
+    level = v.get("quality", "haute")
+    if level == "normale":
+        return {"preset": "veryfast", "crf": int(v.get("crf", 21)), "scale": None, "inter_crf": 16, "sharp": False}
+    if level == "max":
+        return {"preset": "slow", "crf": 17, "scale": (1440, 2560), "inter_crf": 12, "sharp": True}
+    return {"preset": "medium", "crf": 18, "scale": None, "inter_crf": 12, "sharp": True}
+
+
+def _finish_filters(q):
+    """Fin de chaîne vidéo : léger renfort de netteté (le flux du live est compressé) et 1440p en qualité max
+    (YouTube garde alors une bien meilleure qualité)."""
+    f = ""
+    if q["sharp"]:
+        f += ",unsharp=5:5:0.5:5:5:0.0"
+    if q["scale"]:
+        f += f",scale={q['scale'][0]}:{q['scale'][1]}:flags=lanczos"
+    return f
 
 
 _whisper_model = None
@@ -1383,8 +1462,9 @@ def make_teaser(src, work, cfg):
          "[tv][ta][mv][ma]concat=n=2:v=1:a=1[v][a]")
     try:
         subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", src.name, "-filter_complex", g,
-                        "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-                        "-c:a", "aac", "-b:a", "192k", out.name], cwd=work, check=True)
+                        "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-preset", "fast",
+                        "-crf", str(quality_profile(cfg)["inter_crf"]),
+                        "-c:a", "aac", "-b:a", "256k", out.name], cwd=work, check=True)
     except subprocess.CalledProcessError as e:
         log.warning("Teaser impossible (%s) : vidéo sans teaser", e)
         return src, 0.0
@@ -1458,9 +1538,11 @@ def render_bandeau(src, work, cfg, with_subs):
     footer = _dt_escape(b.get("footer", "REDIFSTREAM"))
     dur = float(v["max_duration"])
 
-    g = (f"color=c=0x0E0F13:s=1080x1920:r=30:d={dur}[bg0];"
-         "[0:v]scale=1080:608:force_original_aspect_ratio=decrease,"
-         "pad=1080:608:(ow-iw)/2:(oh-ih)/2:color=0x0E0F13,fps=30[fg];"
+    fps = 60 if video_fps(src) >= 50 else 30          # garde la fluidité des lives en 60 i/s
+    qp = quality_profile(cfg)
+    g = (f"color=c=0x0E0F13:s=1080x1920:r={fps}:d={dur}[bg0];"
+         "[0:v]scale=1080:608:force_original_aspect_ratio=decrease:flags=lanczos,"
+         f"pad=1080:608:(ow-iw)/2:(oh-ih)/2:color=0x0E0F13,fps={fps}[fg];"
          f"[bg0]drawbox=x=0:y=0:w=1080:h=24:color=0x{accent}:t=fill,"
          f"drawbox=x=0:y=555:w=1080:h=9:color=0x{accent}:t=fill,"
          f"drawbox=x=0:y=1173:w=1080:h=9:color=0x{accent}:t=fill[bg1];"
@@ -1478,13 +1560,13 @@ def render_bandeau(src, work, cfg, with_subs):
         fontname = "Rubik Mono One" if font != FONT_FALLBACK else "DejaVu Sans"
         _srt_to_ass(work / "subs.srt", work / "subs.ass", fontname, accent)
         g += f",subtitles=subs.ass:fontsdir='{Path(font).parent}'"
-    g += "[v]"
+    g += _finish_filters(qp) + "[v]"
     out = work / "final.mp4"
     inputs = ["-i", src.name] + (["-i", str(logo)] if use_logo else [])
     cmd = ["ffmpeg", "-y", "-loglevel", "error", *inputs, "-t", str(dur),
            "-filter_complex", g, "-map", "[v]", "-map", "0:a?",
-           "-c:v", "libx264", "-preset", "veryfast", "-crf", str(v.get("crf", 21)),
-           "-c:a", "aac", "-b:a", "160k", "-ar", "44100", "-movflags", "+faststart", out.name]
+           "-c:v", "libx264", "-preset", qp["preset"], "-crf", str(qp["crf"]), "-profile:v", "high",
+           "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart", out.name]
     subprocess.run(cmd, cwd=work, check=True)
     return out
 
@@ -1498,11 +1580,13 @@ def render(src, work, cfg, with_subs):
     use_logo = bool(lg.get("enabled")) and logo.exists()
     if lg.get("enabled") and not logo.exists():
         log.warning("Logo activé mais fichier absent (%s) : vidéo sans logo", logo)
+    fps = 60 if video_fps(src) >= 50 else 30
+    qp = quality_profile(cfg)
     graph = (
         "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,"
         "boxblur=20:5[bg];"
-        "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease[fg];"
-        "[bg][fg]overlay=(W-w)/2:(H-h)/2,fps=30[base];"
+        "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease:flags=lanczos[fg];"
+        f"[bg][fg]overlay=(W-w)/2:(H-h)/2,fps={fps}[base];"
     )
     last = "base"
     if use_logo:
@@ -1521,15 +1605,15 @@ def render(src, work, cfg, with_subs):
         graph += (",subtitles=subs.srt:force_style='FontName=DejaVu Sans,FontSize=16,Bold=1,"
                   "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,"
                   "Outline=2,Shadow=0,Alignment=2,MarginV=70'")
-    graph += "[v]"
+    graph += _finish_filters(qp) + "[v]"
     out = work / "final.mp4"
     inputs = ["-i", src.name] + (["-i", str(logo)] if use_logo else [])
     cmd = [
         "ffmpeg", "-y", "-loglevel", "error", *inputs,
         "-t", str(v["max_duration"]), "-filter_complex", graph,
         "-map", "[v]", "-map", "0:a?",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", str(v.get("crf", 21)),
-        "-c:a", "aac", "-b:a", "160k", "-ar", "44100",
+        "-c:v", "libx264", "-preset", qp["preset"], "-crf", str(qp["crf"]), "-profile:v", "high",
+        "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
         "-movflags", "+faststart", out.name,
     ]
     subprocess.run(cmd, cwd=work, check=True)
@@ -1981,13 +2065,17 @@ def _process(cfg, state, candidates, budget, yt, tt, dry_run):
     work_root = resolve(cfg.get("work_dir", "work"))
     work_root.mkdir(parents=True, exist_ok=True)
     posted = 0
+    waiting = 0
     for c in candidates:
         if posted >= budget:
             break
         from_youtube = "youtube.com" in (c.get("url") or "") or c["source_id"].startswith(("vod:yt-", "yt:"))
         if from_youtube and youtube_blocked(cfg):
-            log.warning("YouTube en pause (vérification anti-robot) jusqu'à %s : « %s » attendra. "
-                        "Tu peux lever la pause depuis l'accueil.", youtube_block_until(cfg), c["title"][:60])
+            if not waiting:
+                log.warning("Téléchargements YouTube en pause jusqu'à %s : les extraits des rediffs YouTube "
+                            "attendent, on publie les clips Twitch (YouTube Shorts et TikTok).",
+                            youtube_block_until(cfg))
+            waiting += 1
             continue
         log.info("→ %s | %s (%d vues)", c["channel"], c["title"], c["views"])
         progress("Téléchargement de l'extrait", f"{c['channel']} — {c['title'][:60]}")

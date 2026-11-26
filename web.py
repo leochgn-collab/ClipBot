@@ -515,8 +515,9 @@ def home():
         nxt = "vers " + t.astimezone(ZoneInfo("Europe/Paris")).strftime("%H:%M") if t > datetime.now(timezone.utc) else "au prochain passage (≤ 15 min)"
     return page("""<h1>Tableau de bord</h1>
 {% if ytblock %}<div class="card err" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
-<div style="flex:1 1 220px">⏸ <b>YouTube en pause jusqu'à {{ytblock}}</b> : YouTube a demandé de confirmer que ce n'est pas un robot.
-ClipBot continue avec Twitch ; les rediffs YouTube attendent. Si ça revient souvent : Cookies → Téléchargements YouTube.</div>
+<div style="flex:1 1 220px">⏸ <b>Téléchargements YouTube en pause jusqu'à {{ytblock}}</b> (YouTube demande de confirmer que ce n'est pas un robot).
+<b>La publication continue</b> sur YouTube Shorts et TikTok avec les clips Twitch ; seuls les extraits des rediffs YouTube attendent la fin de la pause.
+Si ça revient souvent : Cookies → Téléchargements YouTube.</div>
 <form method="post" action="{{url_for('youtube_unblock')}}"><input type="hidden" name="csrf" value="{{csrf_token()}}"><button class="sm sec">Réessayer YouTube maintenant</button></form></div>{% endif %}
 <div class="grid">
 <div class="card stat"><div class="n">{{s['24h']}} / {{cfg.get('max_posts_per_day',6)}}</div><div class="l">publiés sur 24 h</div></div>
@@ -1066,6 +1067,8 @@ def settings():
             sub["language"] = None
         sub["words_per_line"] = clamp("sub_words", 4, 1, 8)
         v["crf"] = clamp("crf", 21, 16, 30)
+        if f.get("quality") in ("haute", "max", "normale"):
+            v["quality"] = f["quality"]
         acc = f.get("accent", "").strip()
         if re.fullmatch(r"#[0-9A-Fa-f]{6}", acc):
             v.setdefault("bandeau", {})["accent"] = acc.upper()
@@ -1183,7 +1186,10 @@ def settings():
 <option value="auto" {{'selected' if (v.subtitles or {}).language is none}}>Détection automatique</option></select></div>
 <div><label>Mots par ligne</label><input type="number" name="sub_words" min="1" max="8" value="{{(v.subtitles or {}).words_per_line or 4}}"></div></div>
 <div class="row"><div><label>Couleur du design (jaune par défaut)</label><input type="color" name="accent" value="{{(v.bandeau or {}).accent or '#FFD21F'}}" style="height:42px"></div>
-<div><label>Qualité vidéo (16 = meilleure, 30 = plus légère)</label><input type="number" name="crf" min="16" max="30" value="{{v.crf or 21}}"></div></div></div>
+<div><label>Qualité vidéo</label><select name="quality">
+{% for k,l in [('haute','Haute (recommandé) : 60 i/s, netteté, encodage soigné'),('max','Maximale : 1440p (YouTube garde une meilleure qualité), plus lent'),('normale','Normale : rapide, plus léger')] %}
+<option value="{{k}}" {{'selected' if (v.quality or 'haute')==k}}>{{l}}</option>{% endfor %}</select></div>
+<div><label>Compression en qualité « Normale » (16 = meilleure, 30 = plus légère)</label><input type="number" name="crf" min="16" max="30" value="{{v.crf or 21}}"></div></div></div>
 
 <div class="card"><h2 style="margin-top:0">YouTube : tags et titres</h2>
 <label>Tags (séparés par des virgules, utilisés seulement en mode API)</label><input name="tags" value="{{ (meta.tags or [])|join(', ') }}">
