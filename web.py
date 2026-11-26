@@ -13,6 +13,10 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import os as _os
+import time as _time
+_os.environ["TZ"] = "Europe/Paris"   # heure de France (le conteneur est en UTC)
+_time.tzset()
 import os
 import re
 import struct
@@ -556,7 +560,7 @@ tick();setInterval(tick,3000);
 
 HISTORY_TABLE = """{% if rows %}<table><tr><th>Date</th><th>Chaîne</th><th>Titre</th><th>Statut</th><th>Liens</th><th></th></tr>
 {% for r in rows %}<tr>
-<td class="mut">{{(r.updated or '')[:16].replace('T',' ')}}</td>
+<td class="mut">{{ r.updated|heure }}</td>
 <td>{{r.channel}}<div class="mut" style="font-size:12px">{{ 'live (moment fort)' if r.platform == 'twitch-vod' else r.platform }}</div></td>
 <td>{{r.title}}{% if r.error %}<div class="err">{{r.error}}</div>{% endif %}</td>
 <td><span class="b {{r.status or 'new'}}">{{ {'done':'publié','error':'erreur'}.get(r.status, 'en cours') }}</span>{% if r.tries %}<div class="mut" style="font-size:12px">{{r.tries}} essai(s)</div>{% endif %}</td>
@@ -669,6 +673,19 @@ def read_status():
         return json.loads((BASE / "work" / "status.json").read_text())
     except (OSError, ValueError):
         return None
+
+
+@app.template_filter("heure")
+def _heure(iso):
+    """Date de la base (UTC) affichée à l'heure de France."""
+    try:
+        from datetime import timezone as _tz
+        d = datetime.fromisoformat(str(iso))
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=_tz.utc)
+        return d.astimezone().strftime("%Y-%m-%d %H:%M")
+    except (TypeError, ValueError):
+        return (iso or "")[:16].replace("T", " ")
 
 
 @app.route("/status")

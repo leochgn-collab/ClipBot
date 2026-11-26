@@ -10,6 +10,10 @@ Usage :
 
 import argparse
 import json
+import os as _os
+import time as _time
+_os.environ["TZ"] = "Europe/Paris"   # heure de France (le conteneur est en UTC)
+_time.tzset()
 import logging
 import math
 import os
