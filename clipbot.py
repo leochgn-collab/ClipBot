@@ -827,6 +827,21 @@ def discover_rediffs(cfg, login, scan=True):
     return url
 
 
+_age_warned = set()
+
+
+def _age_warning(cfg, login, yid):
+    """Rediff limitée aux adultes (GTA…) : YouTube exige un compte connecté et majeur."""
+    if cfg.get("ytdlp_cookies") and resolve(cfg["ytdlp_cookies"]).exists():
+        log.warning("Rediff %s de %s réservée aux adultes et refusée malgré les cookies de téléchargement "
+                    "(compte pas vérifié majeur ? cookies expirés ?)", yid, login)
+    elif login not in _age_warned:
+        log.warning("Rediffs de %s réservées aux adultes (contenu GTA) : ajoute des cookies dans "
+                    "Plus → Cookies → « Téléchargements YouTube » (compte Google majeur, pas RedifStream). "
+                    "En attendant, ces rediffs sont ignorées.", login)
+    _age_warned.add(login)
+
+
 def youtube_rediffs(cfg, url, login, scan=True):
     """Lives complets republiés sur une chaîne YouTube de rediffusions (ex. @MichouRediffs)."""
     if scan and youtube_blocked(cfg):
@@ -861,8 +876,18 @@ def youtube_rediffs(cfg, url, login, scan=True):
         if info is None or (scan and stale):
             if not scan:
                 continue
-            with yt_dlp.YoutubeDL(ydl_base_opts(cfg)) as y:
-                full = y.extract_info(watch, download=False)
+            try:
+                with yt_dlp.YoutubeDL(ydl_base_opts(cfg)) as y:
+                    full = y.extract_info(watch, download=False)
+            except Exception as ex:
+                if "confirm your age" in str(ex) or "inappropriate for some users" in str(ex):
+                    _age_warning(cfg, login, yid)
+                    continue
+                if is_bot_error(ex):
+                    mark_youtube_blocked(cfg)
+                    break
+                log.warning("Rediff YouTube %s ignorée : %s", yid, str(ex)[:150])
+                continue
             info = {"timestamp": full.get("release_timestamp") or full.get("timestamp"),
                     "duration": full.get("duration") or 0, "title": full.get("title") or title,
                     "heatmap": [(h["start_time"], h["end_time"], h["value"]) for h in full.get("heatmap") or []],
@@ -1058,9 +1083,13 @@ def deep_listen(cfg, vid, url, start, end, max_len):
     finally:
         for x in tmp.glob(f"{name}.*"):
             x.unlink(missing_ok=True)
-    score, det = analyse.speech_score([w for w in words if start - a <= w[0] <= end - a], end - start)
+    inside = [w for w in words if start - a <= w[0] <= end - a]
+    # débit habituel du streamer sur ce live (médiane des passages déjà écoutés)
+    prev = [e.get("wps") for k, e in cache.items() if k.startswith(vid + ":") and e.get("wps")]
+    base = float(sorted(prev)[len(prev) // 2]) if len(prev) >= 3 else None
+    score, det = analyse.speech_score(inside, end - start, base)
     s2, e2 = analyse.snap_words(words, start - a, end - a, max_len, min_len=min(15, end - start))
-    res = {"score": score, "s": round(a + s2, 1), "e": round(a + e2, 1),
+    res = {"score": score, "s": round(a + s2, 1), "e": round(a + e2, 1), "wps": det.get("mots/s"),
            "texte": " ".join(w for _, _, w in words)[:160]}
     log.info("Écoute approfondie %s à %ds : note %.2f %s (%d s) « %s… »", vid, start, score, det,
              time.time() - t0, res["texte"][:70])

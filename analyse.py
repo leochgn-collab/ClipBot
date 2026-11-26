@@ -455,7 +455,7 @@ _REACT = [
 _LAUGH_W = re.compile(r"\b(ha(ha)+|ah(ah)+|hi(hi)+|mdr|ptdr|lol)\b|\(rires?\)|\[rires?\]", re.I)
 
 
-def speech_score(words, duration):
+def speech_score(words, duration, base_wps=None):
     """words = [(début, fin, mot)] -> (score 0..1, détails). Mesure les réactions dites :
     exclamations typiques, rires, mots répétés (« non non non »), débit de parole rapide."""
     if duration <= 0:
@@ -464,14 +464,28 @@ def speech_score(words, duration):
     flat = re.sub(r"\s+", " ", text)
     react = sum(flat.count(p) for p in _REACT)
     laugh = len(_LAUGH_W.findall(flat))
-    toks = [re.sub(r"[^\wà-ÿ']", "", w.lower()) for _, _, w in words]
-    rep = sum(1 for i in range(2, len(toks)) if toks[i] and toks[i] == toks[i - 1] == toks[i - 2])
+    toks = [t for t in (re.sub(r"[^\wà-ÿ']", "", w.lower()) for _, _, w in words) if t]
+    # répétitions : un mot OU un petit groupe de mots dit 3 fois d'affilée (« dépêche-toi, dépêche-toi… »)
+    rep, i = 0, 0
+    while i < len(toks):
+        found = 0
+        for n in (1, 2, 3):
+            k = 1
+            while toks[i + k * n:i + (k + 1) * n] == toks[i:i + n] and len(toks[i:i + n]) == n:
+                k += 1
+            if k >= 3:
+                found = k * n
+                rep += k - 2          # « non non non non » compte plus que « non non non »
+                break
+        i += found or 1
     bangs = flat.count("!") + flat.count("?!")
     wps = len(words) / duration
+    # débit : comparé au débit HABITUEL de ce streamer (certains parlent toujours vite)
+    ref = base_wps if base_wps else 1.5
     s = (0.40 * min(1.0, react / max(1.0, duration / 15))
          + 0.20 * min(1.0, laugh / 2)
-         + 0.15 * min(1.0, (rep + bangs / 2) / 3)
-         + 0.25 * float(np.clip((wps - 1.5) / 2.0, 0, 1)))
+         + 0.20 * min(1.0, (rep + bangs / 2) / 2)
+         + 0.20 * float(np.clip((wps - ref) / 1.5, 0, 1)))
     if len(words) < 5:          # presque personne ne parle
         s *= 0.5
     return round(float(min(1.0, s)), 3), {"réactions": react, "rires": laugh, "répétitions": rep,
