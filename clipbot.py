@@ -1335,13 +1335,9 @@ def make_teaser(src, work, cfg):
     return out, t_len
 
 
-def hook_text(work, cfg):
-    """Phrase d'accroche affichée en gros pendant 2,5 s : la réplique la plus forte des sous-titres,
-    sinon le texte de secours des réglages."""
+def best_quote(work):
+    """La réplique la plus forte des sous-titres (réactions, rires, répétitions) : (texte, note) ou (None, 0)."""
     import analyse
-    h = (cfg["video"].get("hook") or {})
-    if not h.get("enabled", True) or not h.get("text", True):
-        return None
     best, best_s = None, 0.0
     srt = work / "subs.srt"
     if srt.exists():
@@ -1352,11 +1348,20 @@ def hook_text(work, cfg):
             txt = " ".join(lines[2:]).strip()
             words = [(i * 0.3, i * 0.3 + 0.25, w) for i, w in enumerate(txt.split())]
             sc, _ = analyse.speech_score(words, max(1.0, len(words) * 0.3))
-            if 2 <= len(words) <= 9 and sc > best_s:
+            if 2 <= len(words) <= 12 and sc > best_s:
                 best, best_s = txt, sc
-    if best and best_s >= 0.15:
-        t = best.upper().rstrip(".")
-        return ("« " + t + " »")[:44]
+    return (best, best_s) if best and best_s >= 0.15 else (None, 0.0)
+
+
+def hook_text(work, cfg):
+    """Phrase d'accroche affichée en gros pendant 2,5 s : la réplique la plus forte des sous-titres,
+    sinon le texte de secours des réglages."""
+    h = (cfg["video"].get("hook") or {})
+    if not h.get("enabled", True) or not h.get("text", True):
+        return None
+    best, _ = best_quote(work)
+    if best:
+        return ("« " + best.upper().rstrip(".") + " »")[:44]
     fb = (h.get("fallback") or "").strip()
     return fb[:44] or None
 
@@ -1479,6 +1484,16 @@ def build_meta(cfg, c):
     raw = c["title"].strip()
     if len(raw.replace(" ", "")) < m.get("min_title_length", 4):  # titres du genre « x »
         raw = m.get("fallback_title") or "Moment fou en live"
+    q = (c.get("quote") or "").strip().strip("«»\"“” ").rstrip(".")
+    if q and m.get("spoken_titles", True):
+        # Titre tiré de ce qui est dit, au style qui marche chez les clippers (voir Tendances)
+        styles = {x["name"]: x["effect"] for x in (load_trends(cfg).get("tables") or {}).get("Style de titre", [])}
+        if styles.get("en MAJUSCULES — oui", 0) > 0.08:
+            q = q.upper()
+        if styles.get("point d'exclamation « ! » — oui", 0) > 0.05 and not q.endswith(("!", "?")):
+            q += " !"
+        q = (q[:1].upper() + q[1:])[:70]
+        raw = (m.get("title_spoken") or "« {quote} »").replace("{quote}", q)
     fields = {"title": raw, "channel": c["channel"],
               "url": c["url"], "credit_url": c["credit_url"]}
 
@@ -1745,6 +1760,61 @@ def own_stats(cfg, state, force=False):
     return res
 
 
+def queue_file(cfg):
+    return resolve(cfg.get("work_dir", "work")) / "file_attente.json"
+
+
+def load_queue(cfg):
+    try:
+        q = json.loads(queue_file(cfg).read_text())
+    except (OSError, ValueError):
+        q = {}
+    return {"top": q.get("top") or [], "skip": q.get("skip") or [], "info": q.get("info") or {}}
+
+
+def save_queue(cfg, q):
+    f = queue_file(cfg)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    skip = q["skip"][-2000:]
+    info = {k: v for k, v in (q.get("info") or {}).items() if k in set(skip)}
+    f.write_text(json.dumps({"top": q["top"][-50:], "skip": skip, "info": info}, ensure_ascii=False))
+
+
+def apply_perf(candidates, perf):
+    """Ce qui marche sur ta chaîne (streamer, type de passage) fait monter ou descendre un candidat."""
+    for c in candidates:
+        bonus = (perf.get("streamer") or {}).get(c["channel"].lower(), 0) + (perf.get("kind") or {}).get(c.get("kind"), 0)
+        if bonus:
+            base_rank = c.get("rank", 2 + min(1.0, math.log10(c["views"] + 1) / 5))
+            c["rank"] = base_rank + 0.25 * max(-1.0, min(1.0, bonus))
+
+
+def order_candidates(cfg, state, candidates, max_tries=3):
+    """L'ordre dans lequel ClipBot publiera (utilisé par les passages ET par la page File d'attente)."""
+    seen = set()
+    q = load_queue(cfg)
+    skip = set(q["skip"])
+    out = [c for c in candidates
+           if c["source_id"] not in seen and not seen.add(c["source_id"])
+           and c["source_id"] not in skip and not state.is_done(c["source_id"], max_tries)]
+    # Ordre : moments des clippers > clips des viewers > moments forts (chacun trié par force/vues)
+    out.sort(key=lambda c: (c.get("rank", 2 + min(1.0, math.log10(c["views"] + 1) / 5)), c["views"]),
+             reverse=True)
+    if cfg.get("rotation", True):
+        # Le créateur publié il y a le plus longtemps passe en premier (tri stable : garde l'ordre ci-dessus)
+        last_by_channel = state.last_post_by_channel()
+        out.sort(key=lambda c: last_by_channel.get(c["channel"].lower(), ""))
+    # Variété : un extrait du même live que la dernière vidéo publiée passe après les autres
+    last = state.db.execute("SELECT source_id FROM clips WHERE status='done' ORDER BY updated DESC LIMIT 1").fetchone()
+    if last and str(last[0]).startswith("vod:"):
+        same = str(last[0]).rsplit(":", 1)[0] + ":"
+        out.sort(key=lambda c: c["source_id"].startswith(same))
+    # Ce que tu as mis en tête dans la File d'attente passe avant tout (dans ton ordre)
+    top = {sid: i for i, sid in enumerate(q["top"])}
+    out.sort(key=lambda c: top.get(c["source_id"], len(top)))
+    return out
+
+
 def run(cfg, dry_run=False, only=None, force=False):
     state = State(resolve(cfg.get("state_db", "clipbot.db")))
     max_tries = cfg.get("max_tries", 3)
@@ -1785,12 +1855,7 @@ def run(cfg, dry_run=False, only=None, force=False):
         except Exception as e:
             log.warning("Statistiques ignorées : %s", e)
     candidates = twitch_candidates(cfg, state) + youtube_candidates(cfg)
-    # Ce qui marche sur ta chaîne (streamer, type de passage) fait monter ou descendre un candidat
-    for c in candidates:
-        bonus = (perf.get("streamer") or {}).get(c["channel"].lower(), 0) + (perf.get("kind") or {}).get(c.get("kind"), 0)
-        if bonus:
-            base_rank = c.get("rank", 2 + min(1.0, math.log10(c["views"] + 1) / 5))
-            c["rank"] = base_rank + 0.25 * max(-1.0, min(1.0, bonus))
+    apply_perf(candidates, perf)
     seen = set()  # un même clip ne doit être traité qu'une fois par passage
     if only:
         # « Publier maintenant » : ce clip-là seulement, sauf s'il est déjà publié
@@ -1805,22 +1870,7 @@ def run(cfg, dry_run=False, only=None, force=False):
             return
         budget = 1
     else:
-        candidates = [c for c in candidates
-                      if c["source_id"] not in seen and not seen.add(c["source_id"])
-                      and not state.is_done(c["source_id"], max_tries)]
-        # Ordre : moments des clippers > clips des viewers > moments forts (chacun trié par force/vues)
-        candidates.sort(key=lambda c: (c.get("rank", 2 + min(1.0, math.log10(c["views"] + 1) / 5)),
-                                       c["views"]), reverse=True)
-        if cfg.get("rotation", True):
-            # Le créateur publié il y a le plus longtemps passe en premier
-            # (à égalité : le clip le plus vu). Tri stable : garde l'ordre par vues.
-            last_by_channel = state.last_post_by_channel()
-            candidates.sort(key=lambda c: last_by_channel.get(c["channel"].lower(), ""))
-        # Variété : un extrait du même live que la dernière vidéo publiée passe après les autres
-        last = state.db.execute("SELECT source_id FROM clips WHERE status='done' ORDER BY updated DESC LIMIT 1").fetchone()
-        if last and str(last[0]).startswith("vod:"):
-            same = str(last[0]).rsplit(":", 1)[0] + ":"
-            candidates.sort(key=lambda c: c["source_id"].startswith(same))
+        candidates = order_candidates(cfg, state, candidates, max_tries)
         budget = min(cfg.get("max_posts_per_run", 2),
                      cfg.get("max_posts_per_day", 6) - state.posted_last_24h())
     if budget <= 0 or not candidates:
@@ -1883,6 +1933,10 @@ def _process(cfg, state, candidates, budget, yt, tt, dry_run):
                 log.warning("Sous-titres impossibles (%s), clip publié sans", e)
                 subs = False
             try:
+                c["quote"] = best_quote(work)[0] if subs else None
+            except Exception:
+                c["quote"] = None
+            try:
                 hk = hook_text(work, cfg) if subs or (cfg["video"].get("hook") or {}).get("fallback") else None
                 if hk:
                     (work / "hook.txt").write_text(hk, encoding="utf-8")
@@ -1920,6 +1974,13 @@ def _process(cfg, state, candidates, budget, yt, tt, dry_run):
                 time.sleep(random.uniform(20, 60))  # pause entre deux clips
             state.save(c, status="done", error=None)
             posted += 1
+            try:
+                q = load_queue(cfg)
+                if c["source_id"] in q["top"]:
+                    q["top"].remove(c["source_id"])
+                    save_queue(cfg, q)
+            except OSError:
+                pass
             short_url = (f"https://youtube.com/shorts/{row.get('youtube_id') or yt_id}"
                          if yt and (row.get("youtube_id") or yt_id) not in (None, "navigateur") else None)
             notify(cfg, f"🎬 Vidéo publiée : {c['channel']}",

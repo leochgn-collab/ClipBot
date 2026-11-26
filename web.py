@@ -347,7 +347,7 @@ pre{background:#0a0c10;border:1px solid var(--line);border-radius:8px;padding:12
 }
 </style></head><body>
 {% if session.ok %}<nav><b>🎬 ClipBot</b>
-{% for p,l in [('home','Tableau de bord'),('available','Clips disponibles'),('history','Historique'),('stats','Statistiques'),('channels','Chaînes'),('settings','Réglages'),('cookies','Cookies'),('media','Captures'),('logs','Logs')] %}
+{% for p,l in [('home','Tableau de bord'),('available',"File d'attente"),('history','Historique'),('stats','Statistiques'),('channels','Chaînes'),('settings','Réglages'),('cookies','Cookies'),('media','Captures'),('logs','Logs')] %}
 <a href="{{url_for(p)}}" class="{{'on' if request.endpoint==p}}">{{l}}</a>{% endfor %}
 <form class="r" method="post" action="{{url_for('logout')}}" style="margin-left:auto"><input type="hidden" name="csrf" value="{{csrf_token()}}"><button class="sec sm">Déconnexion</button></form></nav>{% endif %}
 <main>{% for m in get_flashed_messages() %}<div class="flash">{{m}}</div>{% endfor %}
@@ -739,33 +739,69 @@ def pause():
 @app.route("/available")
 @login_required
 def available():
-    """Clips Twitch disponibles en ce moment (mêmes filtres que les passages automatiques)."""
+    """File d'attente : les prochains Shorts, dans l'ordre où ClipBot les publiera."""
     cfg = load_cfg()
-    error, clips = None, []
+    error, queue = None, []
+    import clipbot
     try:
-        import clipbot
         st = clipbot.State(resolve(cfg.get("state_db", "clipbot.db")))
-        # scan_vods=False : seules les rediffusions déjà analysées (sinon la page mettrait des minutes)
-        clips = clipbot.twitch_candidates(cfg, st, scan_vods=False)
+        # scan_vods=False : seulement ce qui est déjà analysé (sinon la page mettrait des minutes)
+        cands = clipbot.twitch_candidates(cfg, st, scan_vods=False)
+        try:
+            perf = json.loads((resolve(cfg.get("work_dir", "work")) / "performances.json").read_text()).get("effects") or {}
+        except (OSError, ValueError):
+            perf = {}
+        clipbot.apply_perf(cands, perf)
+        queue = clipbot.order_candidates(cfg, st, cands, int((cfg.get("reliability") or {}).get("max_tries", 3)))
     except Exception as e:  # clés Twitch absentes, réseau…
         error = str(e)[:300]
-    con = db()
-    status = {r["source_id"]: r["status"] for r in con.execute("SELECT source_id, status FROM clips")}
-    seen, rows = set(), []
-    for c in sorted(clips, key=lambda c: c["views"], reverse=True):
-        if c["source_id"] in seen:
-            continue
-        seen.add(c["source_id"])
-        rows.append({**c, "status": status.get(c["source_id"])})
-    return page("""<h1>Clips disponibles</h1>
-<p class="mut">Les clips Twitch qui passent tes filtres (chaînes, jeux, vues minimum). « Publier maintenant » ignore les limites par passage et par jour.</p>
+    q = clipbot.load_queue(cfg)
+    top = set(q["top"])
+    skipped = [{"source_id": sid, **(q["info"].get(sid) or {"channel": "", "title": sid})}
+               for sid in reversed(q["skip"][-30:])]
+    kinds = clipbot.KIND_NAMES
+    return page("""<h1>File d'attente</h1>
+<p class="mut">Les prochains Shorts, dans l'ordre où ClipBot les publiera (un à chaque passage). ⬆ met un clip en tête,
+✖ le retire, « Publier maintenant » le publie tout de suite (sans tenir compte des limites).</p>
 {% if error %}<div class="card err">Impossible de lire Twitch : {{error}}</div>{% endif %}
-<div class="card">{% if rows %}<table><tr><th>Chaîne</th><th>Titre</th><th>Vues</th><th>Statut</th><th></th></tr>
-{% for r in rows %}<tr><td>{{r.channel}}</td><td><a href="{{r.url}}" target="_blank" rel="noopener">{{r.title}}</a></td><td>{{r.views}}</td>
-<td>{% if r.status == 'done' %}<span class="b done">publié</span>{% elif r.status == 'error' %}<span class="b error">erreur</span>{% else %}<span class="b new">à venir</span>{% endif %}</td>
-<td>{% if r.status != 'done' %}<form method="post" action="{{url_for('run')}}"><input type="hidden" name="csrf" value="{{csrf_token()}}">
-<input type="hidden" name="mode" value="one"><input type="hidden" name="sid" value="{{r.source_id}}"><button class="sm">Publier maintenant</button></form>{% endif %}</td></tr>{% endfor %}
-</table>{% elif not error %}<p class="mut">Aucun clip ne passe tes filtres pour le moment.</p>{% endif %}</div>""", rows=rows, error=error)
+<div class="card">{% if queue %}<table><tr><th>#</th><th>Streamer</th><th>Titre</th><th>Type</th><th></th></tr>
+{% for r in queue[:40] %}<tr><td>{{loop.index}}{% if r.source_id in top %} ⭐{% endif %}</td><td>{{r.channel}}</td>
+<td><a href="{{r.url}}{% if r.start %}{{ '&' if '?' in r.url else '?' }}t={{ r.start|int }}{% endif %}" target="_blank" rel="noopener">{{r.title}}</a>
+{% if r.start is not none and r.start %}<br><span class="mut" style="font-size:12px">à {{ (r.start|int)//3600 }}h{{ '%02d'|format(((r.start|int)%3600)//60) }} · {{ ((r.end or r.start)-r.start)|int }} s</span>{% endif %}</td>
+<td style="font-size:13px">{{ kinds.get(r.kind, r.platform) }}{% if r.views %}<br><span class="mut">{{r.views}} vues</span>{% endif %}</td>
+<td><div class="row" style="gap:6px;flex-wrap:wrap">
+<form method="post" action="{{url_for('queue_action')}}"><input type="hidden" name="csrf" value="{{csrf_token()}}"><input type="hidden" name="sid" value="{{r.source_id}}"><input type="hidden" name="act" value="top"><button class="sm sec" title="En tête">⬆</button></form>
+<form method="post" action="{{url_for('queue_action')}}"><input type="hidden" name="csrf" value="{{csrf_token()}}"><input type="hidden" name="sid" value="{{r.source_id}}"><input type="hidden" name="act" value="skip"><input type="hidden" name="channel" value="{{r.channel}}"><input type="hidden" name="title" value="{{r.title}}"><button class="sm sec" title="Retirer">✖</button></form>
+<form method="post" action="{{url_for('run')}}"><input type="hidden" name="csrf" value="{{csrf_token()}}"><input type="hidden" name="mode" value="one"><input type="hidden" name="sid" value="{{r.source_id}}"><button class="sm">Publier maintenant</button></form>
+</div></td></tr>{% endfor %}</table>{% elif not error %}<p class="mut">Rien en attente pour le moment (les lives sont analysés au prochain passage).</p>{% endif %}</div>
+{% if skipped %}<h2>Retirés</h2><div class="card"><table>{% for r in skipped %}<tr><td>{{r.channel}}</td><td>{{r.title}}</td>
+<td><form method="post" action="{{url_for('queue_action')}}"><input type="hidden" name="csrf" value="{{csrf_token()}}"><input type="hidden" name="sid" value="{{r.source_id}}"><input type="hidden" name="act" value="restore"><button class="sm sec">Remettre</button></form></td></tr>{% endfor %}</table></div>{% endif %}
+""", queue=queue, error=error, top=top, skipped=skipped, kinds=kinds)
+
+
+@app.route("/queue", methods=["POST"])
+@login_required
+def queue_action():
+    import clipbot
+    cfg = load_cfg()
+    sid, act = request.form.get("sid", ""), request.form.get("act")
+    if not SID_RE.match(sid) or act not in ("top", "skip", "restore"):
+        abort(400)
+    q = clipbot.load_queue(cfg)
+    q["top"] = [x for x in q["top"] if x != sid]
+    q["skip"] = [x for x in q["skip"] if x != sid]
+    if act == "top":
+        q["top"].insert(0, sid)
+        flash("⬆ Mis en tête : ce sera le prochain Short publié.")
+    elif act == "skip":
+        q["skip"].append(sid)
+        q.setdefault("info", {})[sid] = {"channel": request.form.get("channel", "")[:60],
+                                         "title": request.form.get("title", "")[:150]}
+        flash("✖ Retiré de la file d'attente.")
+    else:
+        flash("Remis dans la file d'attente.")
+    clipbot.save_queue(cfg, q)
+    return redirect(url_for("available"))
 
 
 # --------------------------------------------------------------------------
@@ -932,6 +968,7 @@ def settings():
             pub[p]["method"] = f.get(f"{p}_method", "browser")
         pub["youtube"]["privacy"] = f.get("yt_privacy", "public")
         meta["title"] = f.get("title", meta["title"])
+        meta["spoken_titles"] = "spoken_titles" in f
         meta["description"] = f.get("description", meta["description"]).replace("\r\n", "\n")
         meta["tiktok_caption"] = f.get("tiktok_caption", meta.get("tiktok_caption", ""))
         yurl = f.get("youtube_url", "").strip()
@@ -1056,6 +1093,7 @@ def settings():
 <option value="{{o}}" {{'selected' if pub.youtube.privacy==o}}>{{l}}</option>{% endfor %}</select></div>
 
 <div class="card"><h2 style="margin-top:0">Textes</h2><p class="mut">Variables : {title} {channel} {url} {credit_url}</p>
+<label><input type="checkbox" name="spoken_titles" style="width:auto" {{'checked' if meta.get('spoken_titles', True)}}> Titre tiré de ce qui est dit : la réplique la plus forte remplace {title}, au style qui marche dans les Tendances</label>
 <label>Titre YouTube</label><input name="title" value="{{meta.title}}">
 <label>Titre de secours (si le titre du clip est trop court, ex. « x »)</label><input name="fallback_title" value="{{meta.fallback_title or 'Moment fou en live'}}">
 <label>Description YouTube</label><textarea name="description" rows="6">{{meta.description}}</textarea>
