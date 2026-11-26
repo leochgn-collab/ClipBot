@@ -136,6 +136,9 @@ ytdlp_cookies: ""                  # cookies.txt si YouTube bloque les télécha
 
 # Interface web (web.py)
 web:
+  external:                        # accès depuis l'extérieur via Zoraxy (Réglages → Accès depuis l'extérieur)
+    enabled: false
+    domain: clipbot.ton-domaine.fr
   # IP de ton CT Zoraxy : seul lui a le droit d'indiquer l'IP réelle du visiteur
   trusted_proxies: []                # IP de ton reverse proxy (Zoraxy…) si tu en mets un devant
   # Qui peut ouvrir l'interface (vide = tout le monde). Ex. : Zoraxy + ton réseau local

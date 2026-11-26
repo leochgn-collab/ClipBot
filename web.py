@@ -101,8 +101,25 @@ def totp_ok(code):
     return any(hmac.compare_digest(totp_now(secret, now + d * 30), code) for d in (-1, 0, 1))
 
 
+def proxied():
+    """La requête arrive par Zoraxy (accès depuis l'extérieur) ?"""
+    return _in(request.remote_addr or "", WEB.get("_proxies", []))
+
+
 @app.before_request
 def ip_filter():
+    if proxied():
+        ext = WEB.get("_external") or {}
+        # Accès extérieur : seulement si activé, seulement en HTTPS, seulement par le bon nom de domaine.
+        # (le filtrage France + CrowdSec est fait par Zoraxy, la 2FA est obligatoire à la connexion)
+        if not ext.get("enabled"):
+            abort(403)
+        if request.headers.get("X-Forwarded-Proto", "").lower() != "https":
+            abort(403)
+        host = (request.headers.get("X-Forwarded-Host") or request.host or "").split(":")[0].lower()
+        if ext.get("domain") and host != ext["domain"].lower():
+            abort(403)
+        return
     allowed = WEB.get("_allowed")
     if allowed and not _in(client_ip(), allowed):
         abort(403)
@@ -373,7 +390,7 @@ pre{background:#0a0c10;border:1px solid var(--line);border-radius:8px;padding:12
 <main>{% for m in get_flashed_messages() %}<div class="flash">{{m}}</div>{% endfor %}
 {{ body|safe }}</main>
 {% if session.ok %}<nav class="tabbar" aria-label="Menu">
-{% set more = request.endpoint in ('menu','stats','trends','channels','cookies','media','logs','tiktok_login') %}
+{% set more = request.endpoint in ('menu','security','stats','trends','channels','cookies','media','logs','tiktok_login') %}
 <a href="{{url_for('home')}}" class="{{'on' if request.endpoint=='home'}}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></svg>Accueil</a>
 <a href="{{url_for('available')}}" class="{{'on' if request.endpoint=='available'}}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M10 9l5 3-5 3z"/></svg>Clips</a>
 <a href="{{url_for('history')}}" class="{{'on' if request.endpoint=='history'}}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>Historique</a>
@@ -427,6 +444,10 @@ def login():
             return redirect(url_for("login"))
         good_pw = PASS_FILE.exists() and check_password_hash(
             PASS_FILE.read_text().strip(), request.form.get("password", ""))
+        if good_pw and proxied() and not TOTP_FILE.exists():
+            flash("Depuis l'extérieur, la double authentification est obligatoire : active-la d'abord "
+                  "depuis chez toi (Plus → Sécurité).")
+            return redirect(url_for("login"))
         if good_pw and totp_ok(request.form.get("code")):
             session.clear()
             session["ok"] = True
@@ -457,6 +478,7 @@ def menu():
 <a class="btn sec" href="{{url_for('trends')}}">🔥 Tendances (ce qui marche chez les clippers)</a>
 <a class="btn sec" href="{{url_for('channels')}}">Chaînes autorisées</a>
 <a class="btn sec" href="{{url_for('tiktok_login')}}">📱 Connexion TikTok (QR code)</a>
+<a class="btn sec" href="{{url_for('security')}}">🔐 Sécurité (double authentification)</a>
 <a class="btn sec" href="{{url_for('cookies')}}">Cookies</a>
 <a class="btn sec" href="{{url_for('media')}}">Captures et aperçus</a>
 <a class="btn sec" href="{{url_for('logs')}}">Logs</a>
@@ -795,6 +817,73 @@ def youtube_unblock():
     return redirect(url_for("home"))
 
 
+@app.route("/securite", methods=["GET", "POST"])
+@login_required
+def security():
+    """Double authentification (2FA) depuis l'interface, sans console."""
+    if request.method == "POST":
+        act = request.form.get("act")
+        if act == "start":
+            session["totp_pending"] = base64.b32encode(secrets.token_bytes(20)).decode().rstrip("=")
+        elif act == "confirm":
+            sec = session.get("totp_pending")
+            code = request.form.get("code", "").replace(" ", "")
+            if sec and any(hmac.compare_digest(totp_now(sec, time.time() + d * 30), code) for d in (-1, 0, 1)):
+                SECRETS.mkdir(exist_ok=True)
+                TOTP_FILE.write_text(sec)
+                TOTP_FILE.chmod(0o600)
+                session.pop("totp_pending", None)
+                flash("✅ Double authentification activée. Le code te sera demandé à chaque connexion.")
+            else:
+                flash("❌ Code incorrect : vérifie l'heure de ton téléphone et réessaie.")
+        elif act == "disable":
+            if TOTP_FILE.exists() and totp_ok(request.form.get("code")):
+                if proxied():
+                    flash("Désactivation impossible depuis l'extérieur (fais-le depuis chez toi).")
+                else:
+                    TOTP_FILE.unlink()
+                    flash("Double authentification désactivée.")
+            else:
+                flash("❌ Code incorrect.")
+        return redirect(url_for("security"))
+    pending = session.get("totp_pending")
+    qr_svg = None
+    if pending:
+        uri = f"otpauth://totp/ClipBot:admin?secret={pending}&issuer=ClipBot"
+        try:
+            import io
+            import qrcode
+            import qrcode.image.svg
+            buf = io.BytesIO()
+            qrcode.make(uri, image_factory=qrcode.image.svg.SvgPathImage, box_size=8).save(buf)
+            qr_svg = buf.getvalue().decode()
+            qr_svg = qr_svg[qr_svg.find("<svg"):]
+        except Exception:
+            qr_svg = None
+    cfg = load_cfg()
+    ext = (cfg.get("web") or {}).get("external") or {}
+    return page("""<h1>Sécurité</h1>
+<div class="card"><h2 style="margin-top:0">Double authentification (2FA)</h2>
+{% if on %}<p>✅ <b>Activée</b> : un code à 6 chiffres est demandé à chaque connexion.</p>
+<form method="post"><input type="hidden" name="csrf" value="{{csrf_token()}}"><input type="hidden" name="act" value="disable">
+<label>Pour la désactiver, tape un code actuel</label><input name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6">
+<br><br><button class="sec">Désactiver</button></form>
+{% elif pending %}<p>1) Dans ton appli d'authentification (Google Authenticator, Bitwarden, Aegis…), ajoute un compte
+en scannant ce QR code{% if not qr %} (ou en saisissant la clé){% endif %} :</p>
+{% if qr %}<div style="background:#fff;padding:12px;border-radius:12px;width:220px">{{ qr|safe }}</div>{% endif %}
+<p class="mut" style="font-size:13px">Clé à saisir à la main : <code>{{pending}}</code></p>
+<form method="post"><input type="hidden" name="csrf" value="{{csrf_token()}}"><input type="hidden" name="act" value="confirm">
+<label>2) Tape le code à 6 chiffres affiché par l'appli</label><input name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required>
+<br><br><button>Activer</button></form>
+{% else %}<p>❌ <b>Désactivée</b>. Obligatoire pour accéder à ClipBot depuis l'extérieur.</p>
+<form method="post"><input type="hidden" name="csrf" value="{{csrf_token()}}"><input type="hidden" name="act" value="start"><button>Activer la double authentification</button></form>{% endif %}
+</div>
+<div class="card"><h2 style="margin-top:0">Accès depuis l'extérieur</h2>
+<p>{{ '✅ Activé sur https://' ~ ext.domain if ext.enabled else '❌ Désactivé (accès seulement depuis chez toi)' }}</p>
+<p class="mut" style="font-size:13px">Se règle dans Réglages → Accès depuis l'extérieur.</p></div>""",
+                on=TOTP_FILE.exists(), pending=pending, qr=qr_svg, ext=ext)
+
+
 @app.route("/pause", methods=["POST"])
 @login_required
 def pause():
@@ -1066,6 +1155,21 @@ def settings():
             cfg["tiktok_url"] = turl
         else:
             flash("Lien TikTok ignoré : il doit ressembler à https://www.tiktok.com/@tonpseudo")
+        wcfg = cfg.setdefault("web", {})
+        dom = f.get("ext_domain", "").strip().lower()
+        prox = f.get("ext_proxy", "").strip()
+        if re.fullmatch(r"[a-z0-9-]+(\.[a-z0-9-]+)+", dom or "x") is None:
+            dom = ""
+        try:
+            ipaddress.ip_address(prox)
+        except ValueError:
+            prox = ""
+        wcfg["external"] = {"enabled": "ext_on" in f and bool(dom) and bool(prox), "domain": dom}
+        wcfg["trusted_proxies"] = [prox] if prox else []
+        if "ext_on" in f and not (dom and prox):
+            flash("Accès extérieur non activé : nom de domaine ou IP de Zoraxy invalide.")
+        WEB["_proxies"] = _nets(wcfg["trusted_proxies"])
+        WEB["_external"] = wcfg["external"]
         ntfy["url"], ntfy["topic"] = f.get("ntfy_url", "").strip(), f.get("ntfy_topic", "").strip()
         if ntfy["url"] and "://" not in ntfy["url"]:
             ntfy["url"] = "https://" + ntfy["url"]          # « ny.leo44.cloud » -> « https://ny.leo44.cloud »
@@ -1226,6 +1330,15 @@ def settings():
 <div class="card"><h2 style="margin-top:0">Fiabilité</h2><div class="row">
 <div><label>Essais avant d'abandonner un clip</label><input type="number" name="max_tries" min="1" max="10" value="{{cfg.max_tries or 3}}"></div>
 <div><label>Délai max d'une page YouTube (secondes)</label><input type="number" name="timeout" min="20" max="300" value="{{(pub.browser or {}).timeout_s or 60}}"></div></div></div>
+
+<div class="card"><h2 style="margin-top:0">🌍 Accès depuis l'extérieur (via Zoraxy)</h2>
+{% set ext = (cfg.web or {}).external or {} %}
+<p class="mut" style="font-size:13px">Pour ouvrir ClipBot de partout sur https://clipbot.leo44.cloud (ou autre).
+Zoraxy fait le HTTPS, le filtrage France et CrowdSec ; ClipBot exige en plus la double authentification
+(<a href="{{url_for('security')}}">Plus → Sécurité</a>). Depuis chez toi, rien ne change.</p>
+<label><input type="checkbox" name="ext_on" style="width:auto" {{'checked' if ext.enabled}}> Autoriser l'accès extérieur</label>
+<div class="row"><div><label>Nom de domaine</label><input name="ext_domain" value="{{ext.domain or 'clipbot.leo44.cloud'}}"></div>
+<div><label>IP de Zoraxy</label><input name="ext_proxy" value="{{ ((cfg.web or {}).trusted_proxies or ['192.168.1.104'])|first }}"></div></div></div>
 
 <div class="card"><h2 style="margin-top:0">Notifications ntfy</h2><div class="row">
 <div><label>URL du serveur</label><input name="ntfy_url" value="{{ntfy.url or ''}}"></div>
@@ -1444,6 +1557,7 @@ def main():
     web_cfg = load_cfg().get("web") or {}
     WEB["_proxies"] = _nets(web_cfg.get("trusted_proxies"))
     WEB["_allowed"] = _nets(web_cfg.get("allowed_ips"))
+    WEB["_external"] = web_cfg.get("external") or {}
     if not TOTP_FILE.exists():
         print("⚠️ Double authentification non activée : python web.py --setup-2fa")
     app.secret_key = secret_key()
