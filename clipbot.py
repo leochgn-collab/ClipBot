@@ -1365,6 +1365,9 @@ def quality_profile(cfg):
     """Réglages d'encodage selon Réglages → Qualité vidéo."""
     v = cfg["video"]
     level = v.get("quality", "max")
+    if level == "secours":   # exactement l'ancien montage, sans aucune option récente
+        return {"preset": "veryfast", "crf": int(v.get("crf", 21)), "scale": None, "inter_crf": 16, "sharp": False,
+                "plain": True}
     if level == "normale":
         return {"preset": "veryfast", "crf": int(v.get("crf", 21)), "scale": None, "inter_crf": 16, "sharp": False}
     if level == "max":
@@ -1565,7 +1568,7 @@ def render_bandeau(src, work, cfg, with_subs):
     fps = 60 if video_fps(src) >= 50 else 30          # garde la fluidité des lives en 60 i/s
     qp = quality_profile(cfg)
     g = (f"color=c=0x0E0F13:s=1080x1920:r={fps}:d={dur}[bg0];"
-         "[0:v]scale=1080:608:force_original_aspect_ratio=decrease:flags=lanczos,"
+         "[0:v]scale=1080:608:force_original_aspect_ratio=decrease" + ("" if qp.get("plain") else ":flags=lanczos") + ","
          f"pad=1080:608:(ow-iw)/2:(oh-ih)/2:color=0x0E0F13,fps={fps}[fg];"
          f"[bg0]drawbox=x=0:y=0:w=1080:h=24:color=0x{accent}:t=fill,"
          f"drawbox=x=0:y=555:w=1080:h=9:color=0x{accent}:t=fill,"
@@ -1589,8 +1592,8 @@ def render_bandeau(src, work, cfg, with_subs):
     inputs = ["-i", src.name] + (["-i", str(logo)] if use_logo else [])
     cmd = ["ffmpeg", "-y", "-loglevel", "error", *inputs, "-t", str(dur),
            "-filter_complex", g, "-map", "[v]", "-map", "0:a?",
-           "-c:v", "libx264", "-preset", qp["preset"], "-crf", str(qp["crf"]), "-profile:v", "high",
-           "-threads", "4", "-x264-params", "rc-lookahead=30",
+           "-c:v", "libx264", "-preset", qp["preset"], "-crf", str(qp["crf"]),
+           *([] if qp.get("plain") else ["-profile:v", "high", "-threads", "4", "-x264-params", "rc-lookahead=30"]),
            "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart", out.name]
     run_ffmpeg(cmd, work)
     return out
@@ -1600,8 +1603,19 @@ def run_ffmpeg(cmd, cwd):
     """Lance ffmpeg et, en cas d'échec, donne la VRAIE raison (dernières lignes d'erreur, mémoire…)."""
     r = subprocess.run(cmd, cwd=cwd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
     if r.returncode:
-        err = [x for x in (r.stderr or "").strip().splitlines() if x.strip()][-3:]
-        why = " | ".join(err)[-400:]
+        lines = [x.strip() for x in (r.stderr or "").splitlines() if x.strip()]
+        try:   # tout le détail pour le diagnostic
+            (BASE / "logs").mkdir(exist_ok=True)
+            (BASE / "logs" / "ffmpeg-erreur.log").write_text(
+                time.strftime("%d/%m %H:%M:%S") + "\n" + " ".join(map(str, cmd)) + "\n\n" + (r.stderr or ""),
+                encoding="utf-8")
+        except OSError:
+            pass
+        # garder les lignes qui disent POURQUOI (pas la recopie du graphe de filtres)
+        key = [x for x in lines if any(w in x for w in ("rror", "nvalid", "No such", "Unable", "not found",
+                                                         "Cannot", "No option", "Unknown", "unrecognized",
+                                                         "Undefined", "Killed", "memory"))]
+        why = " | ".join(x[:160] for x in (key or lines)[-3:])[-450:]
         if r.returncode in (-9, 137) or "Cannot allocate memory" in why:
             why = "plus assez de mémoire (RAM) pour ce montage. " + why
         raise RuntimeError(f"Montage ffmpeg impossible (code {r.returncode}) : {why or 'erreur inconnue'}")
@@ -1614,7 +1628,7 @@ def render(src, work, cfg, with_subs):
     _whisper_model = None                 # libère la mémoire de Whisper avant le montage
     import gc
     gc.collect()
-    order = ["max", "haute", "normale"]
+    order = ["max", "haute", "normale", "secours"]
     level = cfg["video"].get("quality", "max")
     tries = order[order.index(level):] if level in order else [level]
     last = None
@@ -1672,8 +1686,9 @@ def _render(src, work, cfg, with_subs):
         "ffmpeg", "-y", "-loglevel", "error", *inputs,
         "-t", str(v["max_duration"]), "-filter_complex", graph,
         "-map", "[v]", "-map", "0:a?",
-        "-c:v", "libx264", "-preset", qp["preset"], "-crf", str(qp["crf"]), "-profile:v", "high",
-        "-threads", "4", "-x264-params", "rc-lookahead=30", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+        "-c:v", "libx264", "-preset", qp["preset"], "-crf", str(qp["crf"]),
+        *([] if qp.get("plain") else ["-profile:v", "high", "-threads", "4", "-x264-params", "rc-lookahead=30"]),
+        "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
         "-movflags", "+faststart", out.name,
     ]
     run_ffmpeg(cmd, work)

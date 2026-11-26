@@ -1504,8 +1504,10 @@ def logs():
     return page("""<h1>Logs</h1>
 <h2>Dernier lancement depuis l'interface {{'⏳ en cours' if running else ''}}</h2><pre id="job">{{job or 'Aucun.'}}</pre>
 <h2>Journal ClipBot</h2><pre>{{main}}</pre>
+{% if ff %}<h2>Dernière erreur de montage (ffmpeg)</h2><pre>{{ff}}</pre>{% endif %}
 {% if running %}<script>setTimeout(()=>location.reload(),4000)</script>{% endif %}""",
                 job=tail(JOB_LOG, 150), main=tail(BASE / "logs" / "clipbot.log", 300),
+                ff=tail(BASE / "logs" / "ffmpeg-erreur.log", 40),
                 running=job_running())
 
 
