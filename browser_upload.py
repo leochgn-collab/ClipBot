@@ -210,6 +210,24 @@ class BrowserTikTok:
         self.s = session
         self.sel = session.sel["tiktok"]
 
+    def _dismiss_popups(self, page, hard=False):
+        """Ferme les bulles « nouveautés », la vérification du contenu, les bandeaux… qui gênent les clics."""
+        for txt in ("Compris", "J'ai compris", "Got it", "OK", "Plus tard", "Pas maintenant", "Not now",
+                    "Ignorer", "Skip", "Fermer", "Close"):
+            try:
+                btn = page.get_by_role("button", name=txt, exact=True).first
+                if btn.count() and btn.is_visible():
+                    btn.click(timeout=3_000)
+                    _pause(0.4, 0.8)
+            except Exception:
+                pass
+        page.keyboard.press("Escape")
+        if hard:   # bulles de visite guidée (react-joyride) et calques transparents
+            page.evaluate("""() => document.querySelectorAll(
+                '[class*="joyride"], [class*="Joyride"], [class*="tooltip-overlay"], [class*="TUXModal-overlay"], [data-test-id="spotlight"]'
+            ).forEach(e => e.remove())""")
+        _pause(0.3, 0.6)
+
     def upload(self, path, meta):
         page = self.s.ctx.new_page()
         try:
@@ -221,7 +239,17 @@ class BrowserTikTok:
             editor = page.locator(self.sel["caption"]).first
             editor.wait_for(state="visible", timeout=120_000)
             _pause()
-            editor.click()
+            self._dismiss_popups(page)
+            try:
+                editor.click(timeout=10_000)
+            except Exception:
+                # une bulle d'aide / fenêtre TikTok passe devant la légende : on la retire et on force
+                self._dismiss_popups(page, hard=True)
+                try:
+                    editor.click(timeout=8_000)
+                except Exception:
+                    editor.click(force=True, timeout=8_000)
+                    editor.evaluate("el => el.focus()")
             page.keyboard.press("Control+A")
             page.keyboard.press("Delete")
             for word in meta["tiktok_caption"].split(" "):
@@ -241,7 +269,12 @@ class BrowserTikTok:
             else:
                 raise RuntimeError("le bouton Publier ne s'est jamais activé")
             _pause(1.5, 3)
-            post.click()
+            self._dismiss_popups(page)
+            try:
+                post.click(timeout=15_000)
+            except Exception:
+                self._dismiss_popups(page, hard=True)
+                post.click(force=True, timeout=10_000)
 
             # Fenêtre de confirmation éventuelle (« Publier maintenant »…)
             _pause(2, 3)
