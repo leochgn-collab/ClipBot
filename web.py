@@ -353,7 +353,7 @@ pre{background:#0a0c10;border:1px solid var(--line);border-radius:8px;padding:12
 <main>{% for m in get_flashed_messages() %}<div class="flash">{{m}}</div>{% endfor %}
 {{ body|safe }}</main>
 {% if session.ok %}<nav class="tabbar" aria-label="Menu">
-{% set more = request.endpoint in ('menu','stats','channels','cookies','media','logs','tiktok_login') %}
+{% set more = request.endpoint in ('menu','stats','trends','channels','cookies','media','logs','tiktok_login') %}
 <a href="{{url_for('home')}}" class="{{'on' if request.endpoint=='home'}}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></svg>Accueil</a>
 <a href="{{url_for('available')}}" class="{{'on' if request.endpoint=='available'}}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M10 9l5 3-5 3z"/></svg>Clips</a>
 <a href="{{url_for('history')}}" class="{{'on' if request.endpoint=='history'}}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>Historique</a>
@@ -420,6 +420,7 @@ def menu():
     return page("""<h1>Plus</h1>
 <div class="card" style="display:flex;flex-direction:column;gap:10px">
 <a class="btn sec" href="{{url_for('stats')}}">📈 Statistiques (ce qui marche)</a>
+<a class="btn sec" href="{{url_for('trends')}}">🔥 Tendances (ce qui marche chez les clippers)</a>
 <a class="btn sec" href="{{url_for('channels')}}">Chaînes autorisées</a>
 <a class="btn sec" href="{{url_for('tiktok_login')}}">📱 Connexion TikTok (QR code)</a>
 <a class="btn sec" href="{{url_for('cookies')}}">Cookies</a>
@@ -700,6 +701,30 @@ def ntfy_test():
     return redirect(url_for("settings"))
 
 
+@app.route("/tendances")
+@login_required
+def trends():
+    cfg = load_cfg()
+    try:
+        d = json.loads((resolve(cfg.get("work_dir", "work")) / "tendances.json").read_text())
+    except (OSError, ValueError):
+        d = {}
+    return page("""<h1>Tendances</h1>
+<p class="mut">Ce qui marche chez les clippers que tu suis (Réglages → Comptes de clippers, YouTube et TikTok).
+Chaque vidéo est comparée à la moyenne de <b>son</b> clipper et corrigée de son âge.
+ClipBot s'en sert tout seul : les passages les plus viraux passent en premier{% if d.best_len %}, et les moments forts sont coupés à <b>{{d.best_len}} s</b> maximum (la durée qui marche le mieux){% endif %}.</p>
+{% if (d.n or 0) < 5 %}<div class="card"><p class="mut">Pas encore assez de vidéos de clippers analysées ({{d.n or 0}}). Ajoute des comptes de clippers et lance un passage.</p></div>{% else %}
+<p class="mut" style="font-size:13px">{{d.n}} vidéo(s) analysée(s). « Effet » au-dessus de 0 = fait mieux que d'habitude.</p>
+{% for title, rows in d.tables.items() if rows %}<h2>{{title}}</h2><div class="card"><table>
+<tr><th>{{title}}</th><th>Vidéos</th><th>Vues (médiane)</th><th>Effet</th></tr>
+{% for r in rows %}<tr><td>{{r.name}}</td><td>{{r.n}}</td><td>{{r.views}}</td>
+<td style="color:{{'var(--ok)' if r.effect > 0.05 else ('var(--ko)' if r.effect < -0.05 else 'inherit')}}">{{ '%+.2f'|format(r.effect) }}</td></tr>{% endfor %}
+</table></div>{% endfor %}
+<h2>Les vidéos qui ont le plus cartonné</h2><div class="card"><table><tr><th>Titre</th><th>Clipper</th><th>Vues</th><th>Durée</th></tr>
+{% for t in d.top %}<tr><td>{% if t.from and t.from.startswith('https://') %}<a href="{{t.from}}" target="_blank" rel="noopener">{{t.title}}</a>{% else %}{{t.title}}{% endif %}</td><td>{{t.clipper}}</td><td>{{t.views}}</td><td>{{ (t.len or 0)|int }} s</td></tr>{% endfor %}
+</table></div>{% endif %}""", d=d)
+
+
 @app.route("/pause", methods=["POST"])
 @login_required
 def pause():
@@ -874,6 +899,7 @@ def settings():
         vd["enabled"] = "vods_on" in f
         vd["chat"] = "vods_chat" in f
         vd["deep_listen"] = "vods_deep" in f
+        vd["follow_trends"] = "vods_trends" in f
         vd["deep_max_per_run"] = max(0, min(int(f.get("vods_deep_max") or 12), 60))
         vd["highlights_per_vod"] = max(1, min(int(f.get("vods_per") or 6), 30))
         vd["max_vods"] = max(1, min(int(f.get("vods_max") or 2), 10))
@@ -991,6 +1017,7 @@ def settings():
 <p style="font-size:13px">🧠 {{ model_info }}</p>
 <label><input type="checkbox" name="vods_on" style="width:auto" {{'checked' if (tw.vods or {}).enabled}}> Activer</label>
 <label><input type="checkbox" name="vods_chat" style="width:auto" {{'checked' if (tw.vods or {}).get('chat', True)}}> Analyser aussi le chat (replay du chat YouTube, ou chat incrusté dans la rediff)</label>
+<label><input type="checkbox" name="vods_trends" style="width:auto" {{'checked' if (tw.vods or {}).get('follow_trends', True)}}> Suivre les tendances des clippers (durée des extraits qui marche le mieux, voir 🔥 Tendances)</label>
 <label><input type="checkbox" name="vods_deep" style="width:auto" {{'checked' if (tw.vods or {}).get('deep_listen', True)}}> Écoute approfondie : transcrire les meilleurs passages (réactions, rires) et couper entre deux phrases</label>
 <label>Passages écoutés en profondeur par lancement</label><input type="number" name="vods_deep_max" min="0" max="60" value="{{ (tw.vods or {}).get('deep_max_per_run', 12) }}">
 <div class="row"><div><label>Extraits max par live</label><input type="number" name="vods_per" min="1" max="30" value="{{(tw.vods or {}).highlights_per_vod or 6}}"></div>

@@ -446,7 +446,7 @@ def clipper_moments(cfg, vods_by_id, scan=True):
             stats[0] += 1
             dur = int(clip_len * res["rate"])
             entry.update(vod=res["vod"], offset=res["start"], duration=min(dur, 90), score=res["score"],
-                         rate=res["rate"])
+                         rate=res["rate"], streamer=vods_by_id.get(res["vod"], {}).get("login"))
             entry.pop("checked", None)
             (fdir / f"{sid}.npy").unlink(missing_ok=True)
             log.info("Clipper : « %s » retrouvé dans le live %s à %ds (vitesse ×%s, score %.2f)",
@@ -491,7 +491,11 @@ def clipper_moments(cfg, vods_by_id, scan=True):
                     info = y.extract_info(vid_url, download=False)
                     ts = info.get("timestamp")
                     if ts and now - datetime.fromtimestamp(ts, timezone.utc) > max_age:
-                        cache[sid] = {"vod": None, "old": True}
+                        # trop vieux pour retrouver le live, mais utile pour les tendances (ce qui marche)
+                        cache[sid] = {"vod": None, "old": True, "title": info.get("title", ""), "ts": ts,
+                                      "len": info.get("duration"), "views": info.get("view_count") or 0,
+                                      "likes": info.get("like_count") or 0, "seen_t": time.time(),
+                                      "clipper": info.get("uploader") or info.get("channel") or url}
                         continue
                     y.process_info(info)
                 files = list(work.glob(f"{sid}.*"))
@@ -504,7 +508,9 @@ def clipper_moments(cfg, vods_by_id, scan=True):
                 stats[1] += 1
                 clip_len = info.get("duration") or len(clip_feats) / analyse.FPS
                 entry = {"vod": None, "title": info.get("title", ""), "from": vid_url, "ts": ts,
-                         "len": clip_len, "views": info.get("view_count") or 0}
+                         "len": clip_len, "views": info.get("view_count") or 0,
+                         "likes": info.get("like_count") or 0, "seen_t": time.time(),
+                         "clipper": info.get("uploader") or info.get("channel") or url}
                 if not res:   # gardée (70 Ko) pour réessayer quand d'autres lives seront analysés
                     np.save(fdir / f"{sid}.npy", clip_feats.astype(np.float16))
                 record(sid, entry, res, clip_len, ts, cands)
@@ -516,7 +522,124 @@ def clipper_moments(cfg, vods_by_id, scan=True):
     if stats[1]:
         log.info("Clippers : %d vidéo(s) analysée(s), %d retrouvée(s) dans les lives", stats[1], stats[0])
     cache_file.write_text(json.dumps(cache))
+    try:
+        viral = social_trends(cfg, cache).get("viral") or {}
+    except Exception as e:
+        log.warning("Tendances non calculées : %s", e)
+        viral = {}
+    if viral:
+        # « vues utiles » : une vidéo qui fait 3x mieux que d'habitude pour SON clipper compte 3x plus
+        found = {}
+        for sid, e in cache.items():
+            if e.get("vod") in vods_by_id:
+                boost = 10 ** max(-1.0, min(1.0, viral.get(sid, 0.0)))
+                found.setdefault(e["vod"], []).append((e["offset"], e["duration"],
+                                                       int((e.get("views") or 0) * boost)))
     return found
+
+
+# --------------------------------------------------------------------------
+# Tendances : ce qui marche chez les clippers (YouTube Shorts / TikTok)
+# --------------------------------------------------------------------------
+def _title_traits(t):
+    letters = [ch for ch in t if ch.isalpha()]
+    caps = sum(ch.isupper() for ch in letters) / max(1, len(letters))
+    return {
+        "point d'exclamation « ! »": "!" in t,
+        "question « ? »": "?" in t,
+        "en MAJUSCULES": caps > 0.6,
+        "avec emoji": any(ord(ch) > 0x2600 for ch in t),
+        "titre court (moins de 40 caractères)": len(t) < 40,
+        "avec un chiffre": any(ch.isdigit() for ch in t),
+        "avec des guillemets (phrase dite)": any(q in t for q in ('"', "«", "“")),
+    }
+
+
+def social_trends(cfg, cache=None):
+    """Analyse les vidéos des clippers (vues corrigées de l'âge, comparées à la moyenne de chaque clipper)
+    et en déduit ce qui marche : durée, style de titre, mots, streamers. Sauvé dans tendances.json."""
+    import numpy as np
+    work = resolve(cfg.get("work_dir", "work"))
+    if cache is None:
+        f = work / "clippercache.json"
+        cache = json.loads(f.read_text()) if f.exists() else {}
+    rows = []
+    for sid, e in cache.items():
+        if not e.get("views") or not e.get("ts") or not e.get("title"):
+            continue
+        age_h = max(1.0, ((e.get("seen_t") or time.time()) - e["ts"]) / 3600)
+        rows.append({"id": sid, "title": e["title"], "views": int(e["views"]), "likes": int(e.get("likes") or 0),
+                     "len": e.get("len") or 0, "clipper": e.get("clipper") or "?", "streamer": e.get("streamer"),
+                     "from": e.get("from") or "",
+                     "raw": float(np.log10(e["views"] + 1) - 0.4 * np.log10(age_h / 24 + 1))})
+    res = {"t": time.time(), "n": len(rows), "tables": {}, "top": [], "best_len": None}
+    if len(rows) >= 5:
+        # chaque clipper a son public : on compare une vidéo à la médiane de SON clipper
+        by_c = {}
+        for r in rows:
+            by_c.setdefault(r["clipper"], []).append(r["raw"])
+        med = {c: float(np.median(v)) for c, v in by_c.items()}
+        for r in rows:
+            r["perf"] = r["raw"] - med[r["clipper"]] if len(by_c[r["clipper"]]) >= 3 else r["raw"] - float(
+                np.median([x["raw"] for x in rows]))
+
+        def table(groups):
+            out = []
+            for name, rs in groups.items():
+                if len(rs) < 2:
+                    continue
+                n = len(rs)
+                eff = float(np.mean([r["perf"] for r in rs])) * n / (n + 3)
+                out.append({"name": name, "n": n, "effect": round(eff, 3),
+                            "views": int(np.median([r["views"] for r in rs]))})
+            return sorted(out, key=lambda x: -x["effect"])
+
+        def bucket(L):
+            return ("moins de 20 s" if L < 20 else "20-30 s" if L < 30 else "30-45 s" if L < 45
+                    else "45-60 s" if L <= 60 else "plus d'1 min")
+        dur = {}
+        for r in rows:
+            if r["len"]:
+                dur.setdefault(bucket(r["len"]), []).append(r)
+        res["tables"]["Durée"] = table(dur)
+        traits = {}
+        for r in rows:
+            for k, on in _title_traits(r["title"]).items():
+                traits.setdefault(k + (" — oui" if on else " — non"), []).append(r)
+        res["tables"]["Style de titre"] = [x for x in table(traits) if x["name"].endswith("oui")]
+        words = {}
+        for r in rows:
+            for w in set(re.findall(r"[a-zà-ÿ0-9']{4,}", r["title"].lower())):
+                words.setdefault(w, []).append(r)
+        res["tables"]["Mots qui reviennent dans les titres"] = [x for x in table(
+            {w: rs for w, rs in words.items() if len(rs) >= 3})][:15]
+        st = {}
+        for r in rows:
+            if r["streamer"]:
+                st.setdefault(r["streamer"], []).append(r)
+        res["tables"]["Streamer"] = table(st)
+        res["tables"]["Clipper"] = table({c: [r for r in rows if r["clipper"] == c] for c in by_c})
+        res["top"] = [{k: r[k] for k in ("title", "views", "likes", "len", "clipper", "from")}
+                      for r in sorted(rows, key=lambda r: -r["perf"])[:10]]
+        # durée qui marche le mieux (si assez de données et un écart net)
+        d = [x for x in res["tables"]["Durée"] if x["n"] >= 5]
+        if len(d) >= 2 and d[0]["effect"] - d[-1]["effect"] > 0.1:
+            res["best_len"] = {"moins de 20 s": 25, "20-30 s": 30, "30-45 s": 45, "45-60 s": 59}.get(d[0]["name"])
+        res["viral"] = {r["id"]: round(r["perf"], 3) for r in rows}
+    (work / "tendances.json").write_text(json.dumps(res, ensure_ascii=False))
+    if rows:
+        log.info("Tendances : %d vidéo(s) de clippers analysée(s)%s", len(rows),
+                 f", durée qui marche le mieux : {res['tables']['Durée'][0]['name']}"
+                 if res["tables"].get("Durée") else "")
+    return res
+
+
+def load_trends(cfg):
+    f = resolve(cfg.get("work_dir", "work")) / "tendances.json"
+    try:
+        return json.loads(f.read_text())
+    except (OSError, ValueError):
+        return {}
 
 
 # --------------------------------------------------------------------------
@@ -776,6 +899,8 @@ def vod_candidates(cfg, login, vods, clips, state, moments, model, scan=True, ow
     2) les moments forts (modèle appris, ou pics de son), autour des passages clippés par les viewers."""
     vcfg = cfg["sources"]["twitch"].get("vods") or {}
     length = int(cfg["video"]["max_duration"])
+    trends = load_trends(cfg) if vcfg.get("follow_trends", True) else {}
+    hl_len = min(length, trends.get("best_len") or length)   # durée qui marche chez les clippers
     out = []
     for vid, v in vods.items():
         # Passages déjà publiés : extraits de ce live + clips Twitch publiés de ce live
@@ -851,22 +976,22 @@ def vod_candidates(cfg, login, vods, clips, state, moments, model, scan=True, ow
             replay = analyse.heatmap_bonus(v["heatmap"], len(P))
             chat = replay if chat is None else 1 - (1 - chat) * (1 - replay)   # public : chat OU revisionnages
         if model and len(P):
-            picks = pick_with_model(model, P, length, count, blocked, gap, boosts, chat=chat)
+            picks = pick_with_model(model, P, hl_len, count, blocked, gap, boosts, chat=chat)
         else:
-            picks = pick_highlights(v["levels"], length, count, blocked, gap, boosts, chat=chat)
+            picks = pick_highlights(v["levels"], hl_len, count, blocked, gap, boosts, chat=chat)
         # 3) Découpage intelligent : le cœur de l'action + un peu de contexte, coupé dans un silence
         ex = analyse.excitement(P, model) if len(P) else None
         if ex is not None and chat is not None:
             ex = ex + 2 * (ex.std() + 1e-6) * chat[:len(ex)] if len(chat) >= len(ex) else ex
         for start, end, strength in picks:
             if ex is not None and len(ex) > end:
-                start, end = analyse.refine(start, end, v["feats"], ex, min_len=min(25, length),
-                                            max_len=length, v=vc)
+                start, end = analyse.refine(start, end, v["feats"], ex, min_len=min(20, hl_len),
+                                            max_len=hl_len, v=vc)
             rank = 1 + min(0.99, strength)
             # 4) Écoute approfondie : ce qui est dit (réactions, rires) + découpe sur les phrases
             if vcfg.get("deep_listen", True) and scan:
                 try:
-                    d = deep_listen(cfg, vid, v["url"], start, end, length)
+                    d = deep_listen(cfg, vid, v["url"], start, end, hl_len)
                 except Exception as e:
                     log.warning("Écoute approfondie ignorée (%s à %ds) : %s", vid, start, e)
                     d = None
