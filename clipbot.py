@@ -1122,6 +1122,28 @@ def youtube_blocked(cfg):
     return f.exists() and f.stat().st_mtime > time.time()
 
 
+def youtube_block_until(cfg):
+    f = resolve(cfg.get("work_dir", "work")) / "youtube_bloque"
+    try:
+        return datetime.fromtimestamp(f.stat().st_mtime).strftime("%H:%M")
+    except OSError:
+        return "?"
+
+
+def same_moment(a, b, tol=60):
+    """Deux identifiants désignent-ils le même moment ? (la découpe peut bouger de quelques secondes)"""
+    if a == b:
+        return True
+    if not (a.startswith("vod:") and b.startswith("vod:")):
+        return False
+    va, _, sa = a.rpartition(":")
+    vb, _, sb = b.rpartition(":")
+    try:
+        return va == vb and abs(int(sa) - int(sb)) <= tol
+    except ValueError:
+        return False
+
+
 def mark_youtube_blocked(cfg, hours=2):
     f = resolve(cfg.get("work_dir", "work")) / "youtube_bloque"
     first = not youtube_blocked(cfg)
@@ -1823,9 +1845,11 @@ def order_candidates(cfg, state, candidates, max_tries=3):
     seen = set()
     q = load_queue(cfg)
     skip = set(q["skip"])
+    skip_vod = [x for x in skip if x.startswith("vod:")]
     out = [c for c in candidates
            if c["source_id"] not in seen and not seen.add(c["source_id"])
-           and c["source_id"] not in skip and not state.is_done(c["source_id"], max_tries)]
+           and c["source_id"] not in skip and not any(same_moment(c["source_id"], x) for x in skip_vod)
+           and not state.is_done(c["source_id"], max_tries)]
     # Ordre : moments des clippers > clips des viewers > moments forts (chacun trié par force/vues)
     out.sort(key=lambda c: (c.get("rank", 2 + min(1.0, math.log10(c["views"] + 1) / 5)), c["views"]),
              reverse=True)
@@ -1839,8 +1863,12 @@ def order_candidates(cfg, state, candidates, max_tries=3):
         same = str(last[0]).rsplit(":", 1)[0] + ":"
         out.sort(key=lambda c: c["source_id"].startswith(same))
     # Ce que tu as mis en tête dans la File d'attente passe avant tout (dans ton ordre)
-    top = {sid: i for i, sid in enumerate(q["top"])}
-    out.sort(key=lambda c: top.get(c["source_id"], len(top)))
+    def top_pos(c):
+        for i, sid in enumerate(q["top"]):
+            if same_moment(c["source_id"], sid):
+                return i
+        return len(q["top"])
+    out.sort(key=top_pos)
     return out
 
 
@@ -1893,7 +1921,10 @@ def run(cfg, dry_run=False, only=None, force=False):
     if only:
         # « Publier maintenant » : ce clip-là seulement, sauf s'il est déjà publié
         row = state.get(only)
-        candidates = [c for c in candidates if c["source_id"] == only][:1]
+        exact = [c for c in candidates if c["source_id"] == only]
+        near = sorted((c for c in candidates if same_moment(c["source_id"], only)),
+                      key=lambda c: abs(int(c["source_id"].rsplit(":", 1)[1]) - int(only.rsplit(":", 1)[1])))
+        candidates = (exact or near)[:1]
         if row and row["status"] == "done":
             log.info("Ce clip est déjà publié.")
             return
@@ -1949,6 +1980,8 @@ def _process(cfg, state, candidates, budget, yt, tt, dry_run):
             break
         from_youtube = "youtube.com" in (c.get("url") or "") or c["source_id"].startswith(("vod:yt-", "yt:"))
         if from_youtube and youtube_blocked(cfg):
+            log.warning("YouTube en pause (vérification anti-robot) jusqu'à %s : « %s » attendra. "
+                        "Tu peux lever la pause depuis l'accueil.", youtube_block_until(cfg), c["title"][:60])
             continue
         log.info("→ %s | %s (%d vues)", c["channel"], c["title"], c["views"])
         progress("Téléchargement de l'extrait", f"{c['channel']} — {c['title'][:60]}")

@@ -514,6 +514,10 @@ def home():
         from zoneinfo import ZoneInfo
         nxt = "vers " + t.astimezone(ZoneInfo("Europe/Paris")).strftime("%H:%M") if t > datetime.now(timezone.utc) else "au prochain passage (≤ 15 min)"
     return page("""<h1>Tableau de bord</h1>
+{% if ytblock %}<div class="card err" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+<div style="flex:1 1 220px">⏸ <b>YouTube en pause jusqu'à {{ytblock}}</b> : YouTube a demandé de confirmer que ce n'est pas un robot.
+ClipBot continue avec Twitch ; les rediffs YouTube attendent. Si ça revient souvent : Cookies → Téléchargements YouTube.</div>
+<form method="post" action="{{url_for('youtube_unblock')}}"><input type="hidden" name="csrf" value="{{csrf_token()}}"><button class="sm sec">Réessayer YouTube maintenant</button></form></div>{% endif %}
 <div class="grid">
 <div class="card stat"><div class="n">{{s['24h']}} / {{cfg.get('max_posts_per_day',6)}}</div><div class="l">publiés sur 24 h</div></div>
 <div class="card stat"><div class="n">{{s.total}}</div><div class="l">publiés au total</div></div>
@@ -546,7 +550,7 @@ tick();setInterval(tick,3000);
 </div>{% if cfg.paused %}<p class="err" style="margin:10px 0 0">⏸ En pause : aucune publication automatique. Les essais et « Publier maintenant » marchent toujours.</p>{% endif %}</div>
 <h2>Dernière activité</h2><div class="card">{% include_body %}</div>""".replace(
         "{% include_body %}", HISTORY_TABLE), s=stats, cfg=cfg, rows=last,
-        running=job_running(), active=active, nxt=nxt, st=read_status())
+        running=job_running(), active=active, nxt=nxt, st=read_status(), ytblock=yt_block_info())
 
 
 HISTORY_TABLE = """{% if rows %}<table><tr><th>Date</th><th>Chaîne</th><th>Titre</th><th>Statut</th><th>Liens</th><th></th></tr>
@@ -648,6 +652,15 @@ def tiktok_qr_png():
     resp = app.response_class(png.read_bytes(), mimetype="image/png")
     resp.headers["Cache-Control"] = "no-store"
     return resp
+
+
+def yt_block_info():
+    try:
+        f = resolve(load_cfg().get("work_dir", "work")) / "youtube_bloque"
+        t = f.stat().st_mtime
+        return datetime.fromtimestamp(t).strftime("%H:%M") if t > time.time() else None
+    except OSError:
+        return None
 
 
 def read_status():
@@ -753,6 +766,15 @@ ClipBot s'en sert tout seul : les passages les plus viraux passent en premier{% 
 <h2>Les vidéos qui ont le plus cartonné</h2><div class="card"><table><tr><th>Titre</th><th>Clipper</th><th>Vues</th><th>Durée</th></tr>
 {% for t in d.top %}<tr><td>{% if t.from and t.from.startswith('https://') %}<a href="{{t.from}}" target="_blank" rel="noopener">{{t.title}}</a>{% else %}{{t.title}}{% endif %}</td><td>{{t.clipper}}</td><td>{{t.views}}</td><td>{{ (t.len or 0)|int }} s</td></tr>{% endfor %}
 </table></div>{% endif %}""", d=d)
+
+
+@app.route("/youtube-unblock", methods=["POST"])
+@login_required
+def youtube_unblock():
+    f = resolve(load_cfg().get("work_dir", "work")) / "youtube_bloque"
+    f.unlink(missing_ok=True)
+    flash("Pause YouTube levée : ClipBot réessaiera YouTube au prochain passage.")
+    return redirect(url_for("home"))
 
 
 @app.route("/pause", methods=["POST"])
