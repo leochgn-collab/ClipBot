@@ -317,6 +317,7 @@ def vod_analysis(cfg, vod_id, vod_url):
             files = [f for f in tmp.glob(f"{vod_id}.*") if not f.name.endswith((".part", ".ytdl"))]
             if not files:
                 raise RuntimeError("son du live non téléchargé")
+            youtube_ok(cfg)
             log.info("Son du live téléchargé en %d s (%.0f Mo), analyse…", time.time() - t0,
                      files[0].stat().st_size / 1e6)
             levels, feats = analyse.features(str(files[0]))
@@ -1150,19 +1151,36 @@ def same_moment(a, b, tol=60):
         return False
 
 
-def mark_youtube_blocked(cfg, hours=2):
-    f = resolve(cfg.get("work_dir", "work")) / "youtube_bloque"
-    first = not youtube_blocked(cfg)
+BLOCK_STEPS = (0.5, 1, 2, 4)      # pauses de plus en plus longues si YouTube rebloque
+
+
+def mark_youtube_blocked(cfg, hours=None):
+    """Pause des téléchargements YouTube : 30 min la 1re fois, puis 1 h, 2 h, 4 h si ça recommence.
+    Revient à 30 min dès qu'un téléchargement YouTube réussit."""
+    work = resolve(cfg.get("work_dir", "work"))
+    f, lvl_f = work / "youtube_bloque", work / "youtube_bloque_niveau"
+    if youtube_blocked(cfg):
+        return
+    try:
+        level = int(lvl_f.read_text())
+    except (OSError, ValueError):
+        level = 0
+    hours = hours if hours is not None else BLOCK_STEPS[min(level, len(BLOCK_STEPS) - 1)]
     f.parent.mkdir(parents=True, exist_ok=True)
     f.touch()
     t = time.time() + hours * 3600
     os.utime(f, (t, t))
-    if first:
-        log.warning("YouTube demande de confirmer qu'on n'est pas un robot : pause YouTube de %d h.", hours)
-        notify(cfg, "⚠️ ClipBot : YouTube bloque les téléchargements",
-               f"YouTube demande de confirmer que ce n'est pas un robot. ClipBot laisse YouTube tranquille "
-               f"{hours} h et continue avec Twitch. Si ça revient souvent : Réglages → cookies de téléchargement.",
-               4, ["warning"])
+    lvl_f.write_text(str(level + 1))
+    dur = f"{int(hours * 60)} min" if hours < 1 else f"{hours:g} h"
+    log.warning("YouTube demande de confirmer qu'on n'est pas un robot : pause des téléchargements YouTube de %s.", dur)
+    notify(cfg, "⚠️ ClipBot : YouTube bloque les téléchargements",
+           f"Pause YouTube de {dur}. La publication continue avec les clips Twitch. "
+           f"Si ça revient souvent : Plus → Cookies → Téléchargements YouTube.", 3, ["warning"])
+
+
+def youtube_ok(cfg):
+    """Un téléchargement YouTube a marché : la prochaine pause éventuelle redémarre à 30 min."""
+    (resolve(cfg.get("work_dir", "work")) / "youtube_bloque_niveau").unlink(missing_ok=True)
 
 
 def is_bot_error(e):
@@ -1282,6 +1300,8 @@ def download(c, work, cfg):
     files = sorted(work.glob("source.*"), key=lambda p: p.stat().st_size, reverse=True)
     if not files:
         raise RuntimeError("téléchargement vide")
+    if "youtube.com" in (c.get("url") or ""):
+        youtube_ok(cfg)
     if c.get("start") is not None:
         return exact_cut(c, files[0], work, cfg)
     return files[0]
@@ -2066,6 +2086,7 @@ def _process(cfg, state, candidates, budget, yt, tt, dry_run):
     work_root.mkdir(parents=True, exist_ok=True)
     posted = 0
     waiting = 0
+
     for c in candidates:
         if posted >= budget:
             break
@@ -2160,6 +2181,11 @@ def _process(cfg, state, candidates, budget, yt, tt, dry_run):
                    4, ["warning"])
         finally:
             shutil.rmtree(work, ignore_errors=True)
+    if not posted and waiting:
+        log.warning("Rien de publiable pour l'instant : les %d clip(s) disponibles viennent tous des rediffs "
+                    "YouTube (en pause jusqu'à %s). Les clips Twitch GTA 6 sont déjà tous publiés. "
+                    "Solution : cookies « Téléchargements YouTube », ou « Réessayer YouTube maintenant » sur l'accueil.",
+                    waiting, youtube_block_until(cfg))
     log.info("Terminé : %d clip(s) traité(s)", posted)
 
 
