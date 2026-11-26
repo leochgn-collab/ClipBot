@@ -732,17 +732,22 @@ def youtube_rediffs(cfg, url, login, scan=True):
         vid = "yt-" + yid
         watch = f"https://www.youtube.com/watch?v={yid}"
         meta_file = work / "vodcache" / f"{vid}.meta.json"
-        if meta_file.exists():
-            info = json.loads(meta_file.read_text())
-        elif not scan:
-            continue
-        else:
+        info = json.loads(meta_file.read_text()) if meta_file.exists() else None
+        # « Moments les plus revus » de YouTube : relevés à nouveau toutes les 12 h (ils apparaissent avec les vues)
+        stale = info is not None and not info.get("heatmap") and time.time() - info.get("heatmap_t", 0) > 12 * 3600
+        if info is None or (scan and stale):
+            if not scan:
+                continue
             with yt_dlp.YoutubeDL(ydl_base_opts(cfg)) as y:
                 full = y.extract_info(watch, download=False)
             info = {"timestamp": full.get("release_timestamp") or full.get("timestamp"),
-                    "duration": full.get("duration") or 0, "title": full.get("title") or title}
+                    "duration": full.get("duration") or 0, "title": full.get("title") or title,
+                    "heatmap": [(h["start_time"], h["end_time"], h["value"]) for h in full.get("heatmap") or []],
+                    "heatmap_t": time.time()}
             meta_file.parent.mkdir(parents=True, exist_ok=True)
             meta_file.write_text(json.dumps(info))
+            if info["heatmap"]:
+                log.info("Rediff %s : courbe « moments les plus revus » de YouTube récupérée", yid)
         if (info.get("duration") or 0) < 1800 or not info.get("timestamp"):
             continue
         published = datetime.fromtimestamp(info["timestamp"], timezone.utc)
@@ -758,7 +763,8 @@ def youtube_rediffs(cfg, url, login, scan=True):
         # le live a eu lieu avant la mise en ligne : on recule la date pour accepter les Shorts des clippers
         created = (published - timedelta(days=3)).isoformat()
         vods[vid] = {"id": vid, "title": info["title"], "url": watch, "user_name": login,
-                     "created_at": created, "levels": levels, "feats": feats, "login": login}
+                     "created_at": created, "levels": levels, "feats": feats, "login": login,
+                     "heatmap": info.get("heatmap") or [], "published": published.isoformat()}
     if vods:
         log.info("Rediffs YouTube de %s : %d live(s) utilisable(s)", login, len(vods))
     return vods
@@ -790,7 +796,15 @@ def vod_candidates(cfg, login, vods, clips, state, moments, model, scan=True, ow
                 else:
                     boosts.append(cl["vod_offset"])
 
+        try:
+            age_days = (datetime.now(timezone.utc) - datetime.fromisoformat(
+                (v.get("published") or v["created_at"]).replace("Z", "+00:00"))).total_seconds() / 86400
+        except (KeyError, ValueError):
+            age_days = 0
+        fresh = 0.15 * min(1.0, max(0.0, age_days) / 7)     # jusqu'à -0,15 pour un live d'une semaine
+
         def add(start, end, views, rank):
+            rank -= fresh
             out.append({"source_id": f"vod:{vid}:{int(round(start))}", "platform": "twitch-vod",
                         "kind": "clipper" if views > 0 else "moment",
                         "channel": v["user_name"], "title": v["title"], "url": v["url"],
@@ -833,6 +847,9 @@ def vod_candidates(cfg, login, vods, clips, state, moments, model, scan=True, ow
                     chat = analyse.chat_bonus(act, len(P))
             except Exception as e:
                 log.warning("Chat de %s ignoré : %s", vid, e)
+        if v.get("heatmap") and len(P):
+            replay = analyse.heatmap_bonus(v["heatmap"], len(P))
+            chat = replay if chat is None else 1 - (1 - chat) * (1 - replay)   # public : chat OU revisionnages
         if model and len(P):
             picks = pick_with_model(model, P, length, count, blocked, gap, boosts, chat=chat)
         else:
@@ -1590,6 +1607,11 @@ def run(cfg, dry_run=False, only=None, force=False):
             # (à égalité : le clip le plus vu). Tri stable : garde l'ordre par vues.
             last_by_channel = state.last_post_by_channel()
             candidates.sort(key=lambda c: last_by_channel.get(c["channel"].lower(), ""))
+        # Variété : un extrait du même live que la dernière vidéo publiée passe après les autres
+        last = state.db.execute("SELECT source_id FROM clips WHERE status='done' ORDER BY updated DESC LIMIT 1").fetchone()
+        if last and str(last[0]).startswith("vod:"):
+            same = str(last[0]).rsplit(":", 1)[0] + ":"
+            candidates.sort(key=lambda c: c["source_id"].startswith(same))
         budget = min(cfg.get("max_posts_per_run", 2),
                      cfg.get("max_posts_per_day", 6) - state.posted_last_24h())
     if budget <= 0 or not candidates:

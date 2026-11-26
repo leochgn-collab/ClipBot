@@ -491,3 +491,15 @@ def snap_words(words, start, end, max_len, min_len=10):
             and abs(w[1] - end) <= 5]
     e = min(ends, key=lambda t: abs(t - end)) + 0.4 if ends else end
     return max(0.0, s), min(e, s + max_len)
+
+
+def heatmap_bonus(heatmap, n_seconds):
+    """Courbe « moments les plus revus » de YouTube -> bonus 0..1 par seconde (au-dessus de la normale du live)."""
+    h = np.zeros(n_seconds)
+    for a, b, v in heatmap:
+        h[max(0, int(a)):min(n_seconds, int(np.ceil(b)))] = v
+    if not h.any():
+        return h
+    med = np.median(h[h > 0]) if (h > 0).any() else 0
+    top = h.max()
+    return np.clip((h - med) / (top - med + 1e-9), 0, 1)
