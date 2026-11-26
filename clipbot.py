@@ -1355,9 +1355,9 @@ def exact_cut(c, src, work, cfg):
     dur = float(c["end"]) - want_from
     out = work / "cut.mp4"
     q = quality_profile(cfg)
-    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{offset:.2f}", "-i", src.name, "-t", f"{dur:.2f}",
-                    "-c:v", "libx264", "-preset", "fast", "-crf", str(q["inter_crf"]),
-                    "-c:a", "aac", "-b:a", "256k", out.name], cwd=work, check=True)
+    run_ffmpeg(["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{offset:.2f}", "-i", src.name, "-t", f"{dur:.2f}",
+                "-c:v", "libx264", "-preset", "fast", "-crf", str(q["inter_crf"]), "-threads", "4",
+                "-c:a", "aac", "-b:a", "256k", out.name], work)
     return out
 
 
@@ -1489,8 +1489,8 @@ def make_teaser(src, work, cfg):
                         "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-preset", "fast",
                         "-crf", str(quality_profile(cfg)["inter_crf"]),
                         "-c:a", "aac", "-b:a", "256k", out.name], cwd=work, check=True)
-    except subprocess.CalledProcessError as e:
-        log.warning("Teaser impossible (%s) : vidéo sans teaser", e)
+    except (subprocess.CalledProcessError, RuntimeError) as e:
+        log.warning("Teaser impossible (%s) : vidéo sans teaser", str(e)[:200])
         return src, 0.0
     log.info("Accroche : teaser de %.1f s (pic à %d s) placé au début", t_len, peak)
     return out, t_len
@@ -1590,12 +1590,48 @@ def render_bandeau(src, work, cfg, with_subs):
     cmd = ["ffmpeg", "-y", "-loglevel", "error", *inputs, "-t", str(dur),
            "-filter_complex", g, "-map", "[v]", "-map", "0:a?",
            "-c:v", "libx264", "-preset", qp["preset"], "-crf", str(qp["crf"]), "-profile:v", "high",
+           "-threads", "4", "-x264-params", "rc-lookahead=30",
            "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart", out.name]
-    subprocess.run(cmd, cwd=work, check=True)
+    run_ffmpeg(cmd, work)
     return out
 
 
+def run_ffmpeg(cmd, cwd):
+    """Lance ffmpeg et, en cas d'échec, donne la VRAIE raison (dernières lignes d'erreur, mémoire…)."""
+    r = subprocess.run(cmd, cwd=cwd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    if r.returncode:
+        err = [x for x in (r.stderr or "").strip().splitlines() if x.strip()][-3:]
+        why = " | ".join(err)[-400:]
+        if r.returncode in (-9, 137) or "Cannot allocate memory" in why:
+            why = "plus assez de mémoire (RAM) pour ce montage. " + why
+        raise RuntimeError(f"Montage ffmpeg impossible (code {r.returncode}) : {why or 'erreur inconnue'}")
+    return r
+
+
 def render(src, work, cfg, with_subs):
+    """Montage. Si la qualité choisie est trop lourde pour le serveur, on réessaie un cran en dessous."""
+    global _whisper_model
+    _whisper_model = None                 # libère la mémoire de Whisper avant le montage
+    import gc
+    gc.collect()
+    order = ["max", "haute", "normale"]
+    level = cfg["video"].get("quality", "max")
+    tries = order[order.index(level):] if level in order else [level]
+    last = None
+    for q in tries:
+        cfg_q = {**cfg, "video": {**cfg["video"], "quality": q}}
+        try:
+            out = _render(src, work, cfg_q, with_subs)
+            if q != level:
+                log.warning("Montage fait en qualité « %s » (la qualité « %s » a échoué : %s)", q, level, last)
+            return out
+        except RuntimeError as e:
+            last = str(e)[:200]
+            log.warning("Montage en qualité « %s » impossible : %s", q, last)
+    raise RuntimeError(last or "montage impossible")
+
+
+def _render(src, work, cfg, with_subs):
     v = cfg["video"]
     if v.get("layout", "flou") == "bandeau":
         return render_bandeau(src, work, cfg, with_subs)
@@ -1637,10 +1673,10 @@ def render(src, work, cfg, with_subs):
         "-t", str(v["max_duration"]), "-filter_complex", graph,
         "-map", "[v]", "-map", "0:a?",
         "-c:v", "libx264", "-preset", qp["preset"], "-crf", str(qp["crf"]), "-profile:v", "high",
-        "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+        "-threads", "4", "-x264-params", "rc-lookahead=30", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
         "-movflags", "+faststart", out.name,
     ]
-    subprocess.run(cmd, cwd=work, check=True)
+    run_ffmpeg(cmd, work)
     return out
 
 
