@@ -1097,6 +1097,13 @@ def settings():
 <div><label>Durée max (s)</label><input type="number" name="max_duration" value="{{v.max_duration}}"></div></div>
 <label><input type="checkbox" name="subs" style="width:auto" {{'checked' if (v.subtitles or {}).enabled}}> Sous-titres automatiques</label></div>
 
+<div class="card"><h2 style="margin-top:0">🎞️ Qualité vidéo</h2>
+{% for k,l,d in [('max','Maximale (recommandé)','1440p, 60 images/s : YouTube garde la meilleure qualité. Montage ~1 min.'),('haute','Haute','1080p, 60 images/s. Montage ~40 s.'),('normale','Normale','Rapide et plus léger, qualité réduite.')] %}
+<label style="display:flex;gap:10px;align-items:flex-start;margin:8px 0"><input type="radio" name="quality" value="{{k}}" style="width:auto;margin-top:4px" {{'checked' if (v.quality or 'max')==k}}>
+<span><b>{{l}}</b><br><span class="mut" style="font-size:13px">{{d}}</span></span></label>{% endfor %}
+<details style="margin-top:6px"><summary class="mut" style="font-size:13px">Réglage avancé</summary>
+<label>Compression en qualité « Normale » (16 = meilleure, 30 = plus légère)</label><input type="number" name="crf" min="16" max="30" value="{{v.crf or 21}}"></details></div>
+
 <div class="card"><h2 style="margin-top:0">Design des vidéos</h2>
 <label>Mise en page</label><select name="layout">
 <option value="bandeau" {{'selected' if v.layout == 'bandeau'}}>A · Bandeau (fond noir, message en haut, gameplay encadré)</option>
@@ -1177,7 +1184,7 @@ def settings():
 <label><input type="checkbox" name="hook_text" style="width:auto" {{'checked' if hk.get('text_banner', False)}}> Bandeau jaune avec la réplique la plus forte pendant 2,5 s (désactivé par défaut)</label>
 <label>Texte de secours (si aucune réplique forte, vide = rien)</label><input name="hook_fallback" maxlength="44" value="{{hk.fallback or ''}}" placeholder="REGARDE JUSQU'À LA FIN"></div>
 
-<div class="card"><h2 style="margin-top:0">Sous-titres et qualité</h2><div class="row">
+<div class="card"><h2 style="margin-top:0">Sous-titres</h2><div class="row">
 <div><label>Précision des sous-titres</label><select name="sub_model">
 {% for m,l in [('tiny','Très rapide (moins précis)'),('base','Rapide'),('small','Équilibré (conseillé)'),('medium','Très précis (lent)')] %}
 <option value="{{m}}" {{'selected' if (v.subtitles or {}).model == m or (m == 'small' and not (v.subtitles or {}).model)}}>{{l}}</option>{% endfor %}</select></div>
@@ -1187,10 +1194,7 @@ def settings():
 <option value="auto" {{'selected' if (v.subtitles or {}).language is none}}>Détection automatique</option></select></div>
 <div><label>Mots par ligne</label><input type="number" name="sub_words" min="1" max="8" value="{{(v.subtitles or {}).words_per_line or 4}}"></div></div>
 <div class="row"><div><label>Couleur du design (jaune par défaut)</label><input type="color" name="accent" value="{{(v.bandeau or {}).accent or '#FFD21F'}}" style="height:42px"></div>
-<div><label>Qualité vidéo</label><select name="quality">
-{% for k,l in [('max','Maximale (recommandé) : 1440p 60 i/s, YouTube garde la meilleure qualité'),('haute','Haute : 1080p 60 i/s, plus rapide'),('normale','Normale : rapide, plus léger')] %}
-<option value="{{k}}" {{'selected' if (v.quality or 'max')==k}}>{{l}}</option>{% endfor %}</select></div>
-<div><label>Compression en qualité « Normale » (16 = meilleure, 30 = plus légère)</label><input type="number" name="crf" min="16" max="30" value="{{v.crf or 21}}"></div></div></div>
+</div></div>
 
 <div class="card"><h2 style="margin-top:0">YouTube : tags et titres</h2>
 <label>Tags (séparés par des virgules, utilisés seulement en mode API)</label><input name="tags" value="{{ (meta.tags or [])|join(', ') }}">
