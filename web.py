@@ -1048,6 +1048,8 @@ def settings():
         else:
             flash("Lien TikTok ignoré : il doit ressembler à https://www.tiktok.com/@tonpseudo")
         ntfy["url"], ntfy["topic"] = f.get("ntfy_url", "").strip(), f.get("ntfy_topic", "").strip()
+        if ntfy["url"] and "://" not in ntfy["url"]:
+            ntfy["url"] = "https://" + ntfy["url"]          # « ny.leo44.cloud » -> « https://ny.leo44.cloud »
         if f.get("ntfy_token"):
             ntfy["token"] = f["ntfy_token"].strip()
         # --- Réglages avancés

@@ -125,7 +125,7 @@ def notify(cfg, title, message, priority=3, tags=None, click=None):
         headers["Authorization"] = "Bearer " + n["token"]
     try:
         requests.post(
-            n["url"].rstrip("/"),
+            (n["url"] if "://" in n["url"] else "https://" + n["url"]).rstrip("/"),
             json={"topic": n["topic"], "title": title, "message": message,
                   "priority": priority, "tags": tags or [], **({"click": click} if click else {})},
             headers=headers, timeout=15,
@@ -379,7 +379,10 @@ def vod_chat(cfg, vod_id, vod_url, scan=True):
                 log.info("Chat : %s pour %s (%d s)", "chat incrusté détecté dans la vidéo" if act is not None
                          else "pas de chat dans la vidéo", vod_id, time.time() - t0)
         except Exception as e:
-            log.warning("Chat incrusté de %s non analysé : %s", vod_id, e)
+            if is_bot_error(e):
+                mark_youtube_blocked(cfg)
+                return None            # pas de marque « sans chat » : on réessaiera après la pause
+            log.warning("Chat incrusté de %s non analysé : %s", vod_id, str(e)[:200])
     for x in tmp.glob(f"{vod_id}*"):
         x.unlink(missing_ok=True)
     cache.mkdir(parents=True, exist_ok=True)
@@ -1018,7 +1021,10 @@ def vod_candidates(cfg, login, vods, clips, state, moments, model, scan=True, ow
                 try:
                     d = deep_listen(cfg, vid, v["url"], start, end, hl_len)
                 except Exception as e:
-                    log.warning("Écoute approfondie ignorée (%s à %ds) : %s", vid, start, e)
+                    if is_bot_error(e):
+                        mark_youtube_blocked(cfg)     # on arrête d'insister : pause YouTube
+                    else:
+                        log.warning("Écoute approfondie ignorée (%s à %ds) : %s", vid, start, str(e)[:200])
                     d = None
                 if d:
                     start, end = d["s"], d["e"]
@@ -2006,7 +2012,7 @@ def _process(cfg, state, candidates, budget, yt, tt, dry_run):
                 hk = hook_text(work, cfg) if subs or (cfg["video"].get("hook") or {}).get("fallback") else None
                 if hk:
                     (work / "hook.txt").write_text(hk, encoding="utf-8")
-                    log.info("Accroche : « %s »", hk)
+                    log.info("Accroche : %s", hk)
             except Exception as e:
                 log.warning("Texte d'accroche ignoré : %s", e)
             progress("Montage de la vidéo", f"{c['channel']} — {c['title'][:60]}")
