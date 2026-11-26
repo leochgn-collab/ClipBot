@@ -62,7 +62,7 @@ video:
     file: assets/logo.png
     position: top                  # top = en haut, bottom = en bas
     width: 220
-  quality: haute                   # haute (60 i/s, netteté) | max (1440p) | normale (rapide)
+  quality: max                     # max (1440p 60 i/s) | haute (1080p 60 i/s) | normale (rapide)
   crf: 21                          # compression utilisée seulement en qualité « normale »
   subtitles:
     enabled: true                  # nécessite faster-whisper

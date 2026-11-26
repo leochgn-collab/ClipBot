@@ -1069,6 +1069,7 @@ def settings():
         v["crf"] = clamp("crf", 21, 16, 30)
         if f.get("quality") in ("haute", "max", "normale"):
             v["quality"] = f["quality"]
+            v["quality_choisie"] = True
         acc = f.get("accent", "").strip()
         if re.fullmatch(r"#[0-9A-Fa-f]{6}", acc):
             v.setdefault("bandeau", {})["accent"] = acc.upper()
@@ -1187,8 +1188,8 @@ def settings():
 <div><label>Mots par ligne</label><input type="number" name="sub_words" min="1" max="8" value="{{(v.subtitles or {}).words_per_line or 4}}"></div></div>
 <div class="row"><div><label>Couleur du design (jaune par défaut)</label><input type="color" name="accent" value="{{(v.bandeau or {}).accent or '#FFD21F'}}" style="height:42px"></div>
 <div><label>Qualité vidéo</label><select name="quality">
-{% for k,l in [('haute','Haute (recommandé) : 60 i/s, netteté, encodage soigné'),('max','Maximale : 1440p (YouTube garde une meilleure qualité), plus lent'),('normale','Normale : rapide, plus léger')] %}
-<option value="{{k}}" {{'selected' if (v.quality or 'haute')==k}}>{{l}}</option>{% endfor %}</select></div>
+{% for k,l in [('max','Maximale (recommandé) : 1440p 60 i/s, YouTube garde la meilleure qualité'),('haute','Haute : 1080p 60 i/s, plus rapide'),('normale','Normale : rapide, plus léger')] %}
+<option value="{{k}}" {{'selected' if (v.quality or 'max')==k}}>{{l}}</option>{% endfor %}</select></div>
 <div><label>Compression en qualité « Normale » (16 = meilleure, 30 = plus légère)</label><input type="number" name="crf" min="16" max="30" value="{{v.crf or 21}}"></div></div></div>
 
 <div class="card"><h2 style="margin-top:0">YouTube : tags et titres</h2>

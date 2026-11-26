@@ -46,6 +46,9 @@ def merge(dst, src):               # ajoute seulement les réglages absents
         elif isinstance(v, dict) and isinstance(dst[k], dict):
             merge(dst[k], v)
 merge(c, ex)
+v = c.setdefault("video", {})
+if v.get("quality") == "haute" and not v.get("quality_choisie"):
+    v["quality"] = "max"            # meilleure qualité par défaut (tant que tu n'as pas choisi toi-même)
 shutil.copy(p, p + ".avant-maj")
 open(p, "w", encoding="utf-8").write(yaml.safe_dump(c, allow_unicode=True, sort_keys=False))
 PY

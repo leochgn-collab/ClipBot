@@ -1267,8 +1267,8 @@ def download(c, work, cfg):
         **ydl_base_opts(cfg),
         "outtmpl": str(work / "source.%(ext)s"),
         # meilleure image jusqu'en 1080p : 60 i/s et plus gros débit d'abord
-        "format": "bv*[height<=1080]+ba/b[height<=1080]/bv*+ba/b",
-        "format_sort": ["res:1080", "fps", "vbr", "tbr"],
+        "format": "bv*[height<=1440]+ba/b[height<=1440]/bv*+ba/b",
+        "format_sort": ["res:1440", "fps", "vbr", "tbr"],
         "merge_output_format": "mp4",
     }
     if c.get("start") is not None:
@@ -1340,11 +1340,11 @@ def exact_cut(c, src, work, cfg):
 def quality_profile(cfg):
     """Réglages d'encodage selon Réglages → Qualité vidéo."""
     v = cfg["video"]
-    level = v.get("quality", "haute")
+    level = v.get("quality", "max")
     if level == "normale":
         return {"preset": "veryfast", "crf": int(v.get("crf", 21)), "scale": None, "inter_crf": 16, "sharp": False}
     if level == "max":
-        return {"preset": "slow", "crf": 17, "scale": (1440, 2560), "inter_crf": 12, "sharp": True}
+        return {"preset": "slow", "crf": 16, "scale": (1440, 2560), "inter_crf": 10, "sharp": True}
     return {"preset": "medium", "crf": 18, "scale": None, "inter_crf": 12, "sharp": True}
 
 
