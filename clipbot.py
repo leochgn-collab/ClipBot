@@ -1856,7 +1856,6 @@ def run(cfg, dry_run=False, only=None, force=False):
             log.warning("Statistiques ignorées : %s", e)
     candidates = twitch_candidates(cfg, state) + youtube_candidates(cfg)
     apply_perf(candidates, perf)
-    seen = set()  # un même clip ne doit être traité qu'une fois par passage
     if only:
         # « Publier maintenant » : ce clip-là seulement, sauf s'il est déjà publié
         row = state.get(only)

@@ -137,9 +137,11 @@ class BrowserSession:
             page.goto("https://www.tiktok.com/login/qrcode", wait_until="domcontentloaded")
             _pause(3, 5)
             for txt in ("Refuser les cookies optionnels", "Decline optional cookies", "Tout refuser"):
-                try:
-                    page.get_by_text(txt).first.click(timeout=2_000)
-                    break
+                try:   # bandeau cookies : on refuse s'il est là, sans attendre s'il n'y est pas
+                    btn = page.get_by_text(txt).first
+                    if btn.count() and btn.is_visible():
+                        btn.click(timeout=3_000)
+                        break
                 except Exception:
                     pass
             deadline = time.time() + max_wait
