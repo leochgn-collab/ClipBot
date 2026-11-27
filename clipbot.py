@@ -1688,7 +1688,7 @@ def _find_faces(frames):
     for i, g in enumerate(frames):
         eq = cv2.equalizeHist(g)
         H = g.shape[0]
-        mx = (int(H * 0.42), int(H * 0.42))      # visage énorme = caméra plein écran, pas d'incrustation
+        mx = (int(H * 0.30), int(H * 0.30))      # visage énorme = caméra plein écran, pas d'incrustation
         found = []
         for k, c in enumerate(casc):
             if c is None:
@@ -1817,10 +1817,14 @@ def detect_facecam(src):
         l, r = max(0, L), min(W, R)
         t, b = max(0, T), min(H, B)
         bw, bh = r - l, b - t
+    if bw * bh > 0.35 * W * H:      # « caméra » qui prend plus d'un tiers de l'écran : pas une incrustation
+        log.info("Caméra trop grande (%d %% de l'image) : pas de présentation caméra pour ce clip",
+                 100 * bw * bh / (W * H))
+        return None
     log.info("Caméra trouvée : visage sur %d/%d images, cadre %d×%d à (%d, %d) sur %d×%d%s",
              len(best["frames"]), len(frames), bw, bh, l, t, W, H,
              " (bords de l'incrustation)" if sane and (okl or okr or okt or okb) else "")
-    return (l / W, t / H, bw / W, bh / H)
+    return (float(l / W), float(t / H), float(bw / W), float(bh / H))
 
 
 def facecam_box(src, c):
