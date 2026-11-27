@@ -21,6 +21,7 @@ python3 -m venv "$DIR/venv"
 "$DIR/venv/bin/pip" install --upgrade pip
 # av : version précompilée obligatoire (la compiler demande des outils absents)
 "$DIR/venv/bin/pip" install --only-binary=av -r "$DIR/requirements.txt"
+"$DIR/venv/bin/pip" install --upgrade "yt-dlp[default]" deno || true
 PLAYWRIGHT_BROWSERS_PATH="$DIR/ms-playwright" "$DIR/venv/bin/python" -m playwright install --with-deps chromium
 
 cp systemd/clipbot.service systemd/clipbot.timer systemd/clipbot-web.service systemd/clipbot-run.service systemd/clipbot-run.path /etc/systemd/system/

@@ -34,6 +34,8 @@ import yt_dlp
 
 log = logging.getLogger("clipbot")
 BASE = Path(__file__).resolve().parent
+# Deno écrit son cache ici (le service n'a le droit d'écrire que dans /opt/clipbot)
+os.environ.setdefault("DENO_DIR", str(BASE / "work" / "deno"))
 MB = 1024 * 1024
 
 
@@ -1125,7 +1127,7 @@ def _whisper(cfg):
 # Sources : YouTube (moments les plus revus via la heatmap)
 # --------------------------------------------------------------------------
 BOT_MARKERS = ("confirm you're not a bot", "confirm you’re not a bot", "Sign in to confirm",
-               "YouTube n'a fourni que le son")
+               "YouTube n'a fourni que le son", "Requested format is not available")
 
 
 def youtube_blocked(cfg):
@@ -1192,10 +1194,22 @@ def is_bot_error(e):
     return any(m.lower() in str(e).lower() for m in BOT_MARKERS)
 
 
+def deno_path():
+    """Moteur JavaScript Deno : obligatoire pour YouTube depuis yt-dlp 2025.11 (sinon « format not available »)."""
+    import shutil
+    for cand in (Path(sys.executable).parent / "deno", Path("/usr/local/bin/deno"), Path.home() / ".deno/bin/deno"):
+        if cand.exists():
+            return str(cand)
+    return shutil.which("deno")
+
+
 def ydl_base_opts(cfg):
     opts = {"quiet": True, "no_warnings": True, "noprogress": True,
             # discret : petites pauses entre les requêtes (moins de risque de blocage YouTube)
             "sleep_interval_requests": 0.75}
+    d = deno_path()
+    if d:
+        opts["js_runtimes"] = {"deno": {"path": d}}
     cookies = cfg.get("ytdlp_cookies")
     if cookies:
         opts["cookiefile"] = str(resolve(cookies))

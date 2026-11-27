@@ -25,7 +25,18 @@ mkdir -p "$DIR"/{assets/fonts,trigger,logs,screenshots,preview,work,secrets}
 
 echo "→ Dépendances Python…"
 "$DIR/venv/bin/pip" install -q --only-binary=av -r "$DIR/requirements.txt"
-"$DIR/venv/bin/pip" install -q --upgrade yt-dlp   # YouTube change souvent : toujours la dernière version
+# YouTube change souvent : toujours la dernière version, avec ses composants JavaScript (yt-dlp-ejs)
+"$DIR/venv/bin/pip" install -q --upgrade "yt-dlp[default]"
+# Deno (moteur JavaScript) : obligatoire pour télécharger depuis YouTube depuis fin 2025
+"$DIR/venv/bin/pip" install -q --upgrade deno 2>/dev/null || true
+if [ ! -x "$DIR/venv/bin/deno" ] && ! command -v deno >/dev/null 2>&1; then
+  echo "Installation de Deno…"
+  apt-get install -y -qq unzip curl >/dev/null 2>&1 || true
+  curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh -s -- -y </dev/null >/dev/null 2>&1 || true
+fi
+if [ -x "$DIR/venv/bin/deno" ]; then echo "Deno : $("$DIR/venv/bin/deno" --version | head -1)";
+elif command -v deno >/dev/null 2>&1; then echo "Deno : $(deno --version | head -1)";
+else echo "⚠️  Deno non installé : les téléchargements YouTube risquent d'échouer"; fi
 
 if [ ! -s "$DIR/assets/fonts/RubikMonoOne-Regular.ttf" ]; then
   curl -fsSL -o "$DIR/assets/fonts/RubikMonoOne-Regular.ttf" \
