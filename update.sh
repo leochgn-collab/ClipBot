@@ -26,9 +26,10 @@ mkdir -p "$DIR"/{assets/fonts,trigger,logs,screenshots,preview,work,secrets}
 echo "→ Dépendances Python…"
 "$DIR/venv/bin/pip" install -q --only-binary=av -r "$DIR/requirements.txt"
 # YouTube change souvent : toujours la dernière version, avec ses composants JavaScript (yt-dlp-ejs)
-"$DIR/venv/bin/pip" install -q --upgrade "yt-dlp[default]"
+echo "  (yt-dlp et Deno : 1 à 5 min la première fois, c'est normal)"
+"$DIR/venv/bin/pip" install --progress-bar on --upgrade "yt-dlp[default]" | grep -E "^(Collecting|Successfully)" || true
 # Deno (moteur JavaScript) : obligatoire pour télécharger depuis YouTube depuis fin 2025
-"$DIR/venv/bin/pip" install -q --upgrade deno 2>/dev/null || true
+"$DIR/venv/bin/pip" install --upgrade deno 2>/dev/null | grep -E "^(Collecting|Downloading|Successfully)" || true
 if [ ! -x "$DIR/venv/bin/deno" ] && ! command -v deno >/dev/null 2>&1; then
   echo "Installation de Deno…"
   apt-get install -y -qq unzip curl >/dev/null 2>&1 || true
