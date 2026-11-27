@@ -1124,7 +1124,8 @@ def _whisper(cfg):
 # --------------------------------------------------------------------------
 # Sources : YouTube (moments les plus revus via la heatmap)
 # --------------------------------------------------------------------------
-BOT_MARKERS = ("confirm you're not a bot", "confirm you’re not a bot", "Sign in to confirm")
+BOT_MARKERS = ("confirm you're not a bot", "confirm you’re not a bot", "Sign in to confirm",
+               "YouTube n'a fourni que le son")
 
 
 def youtube_blocked(cfg):
@@ -1304,11 +1305,27 @@ def download(c, work, cfg):
     files = sorted(work.glob("source.*"), key=lambda p: p.stat().st_size, reverse=True)
     if not files:
         raise RuntimeError("téléchargement vide")
+    with_video = [f for f in files if has_video(f)]
+    if not with_video:
+        # YouTube limite parfois un serveur repéré au son seul : ce n'est pas la faute du clip
+        if "youtube.com" in (c.get("url") or ""):
+            raise RuntimeError("YouTube n'a fourni que le son (vidéo bloquée pour ce serveur) : réessai plus tard")
+        raise RuntimeError("le téléchargement ne contient pas d'image (son seul)")
+    files = with_video
     if "youtube.com" in (c.get("url") or ""):
         youtube_ok(cfg)
     if c.get("start") is not None:
         return exact_cut(c, files[0], work, cfg)
     return files[0]
+
+
+def has_video(path):
+    try:
+        r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v", "-show_entries", "stream=index",
+                            "-of", "csv=p=0", str(path)], capture_output=True, text=True, timeout=30)
+        return bool(r.stdout.strip())
+    except Exception:
+        return True      # dans le doute, on laisse le montage essayer
 
 
 def video_fps(path):
