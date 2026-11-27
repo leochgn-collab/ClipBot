@@ -1092,7 +1092,11 @@ def settings():
         cfg["rotation"] = "rotation" in f
         v["max_duration"] = num("max_duration", 59)
         v.setdefault("subtitles", {})["enabled"] = "subs" in f
-        v["layout"] = "bandeau" if f.get("layout") == "bandeau" else "flou"
+        v["layout"] = f.get("layout") if f.get("layout") in ("camera", "bandeau", "flou") else "camera"
+        v["layout_choisi"] = True
+        cam = v.setdefault("camera", {})
+        cam["title"] = (f.get("cam_title") or "{streamer} en live sur GTA 6").strip()[:60]
+        cam["label"] = (f.get("cam_label") or "Clip : {streamer} ({plateforme})").strip()[:60]
         bd = v.setdefault("bandeau", {})
         for k, d in (("line1", "ABONNEZ-VOUS"), ("line2", "ET LIKEZ !"), ("footer", "REDIFSTREAM")):
             bd[k] = (f.get("bd_" + k) or d).strip()[:40]
@@ -1227,8 +1231,13 @@ def settings():
 
 <div class="card"><h2 style="margin-top:0">Design des vidéos</h2>
 <label>Mise en page</label><select name="layout">
+<option value="camera" {{'selected' if v.layout == 'camera'}}>Caméra + jeu (caméra du streamer en haut, jeu en dessous)</option>
 <option value="bandeau" {{'selected' if v.layout == 'bandeau'}}>A · Bandeau (fond noir, message en haut, gameplay encadré)</option>
-<option value="flou" {{'selected' if v.layout != 'bandeau'}}>Fond flou (ancien)</option></select>
+<option value="flou" {{'selected' if v.layout not in ('bandeau', 'camera')}}>Fond flou (ancien)</option></select>
+<p class="mut" style="font-size:13px">Caméra + jeu : ClipBot trouve tout seul la caméra dans le live. S'il n'y en a pas, le clip sort en « Bandeau ».</p>
+<label>Titre du haut (Caméra + jeu)</label><input name="cam_title" maxlength="60" value="{{(v.camera or {}).title or '{streamer} en live sur GTA 6'}}">
+<label>Étiquette sur la caméra</label><input name="cam_label" maxlength="60" value="{{(v.camera or {}).label or 'Clip : {streamer} ({plateforme})'}}">
+<p class="mut" style="font-size:13px">{streamer} = nom du streamer, {plateforme} = Twitch ou YouTube.</p>
 <div class="row"><div><label>Ligne 1 du haut</label><input name="bd_line1" maxlength="40" value="{{(v.bandeau or {}).line1 or 'ABONNEZ-VOUS'}}"></div>
 <div><label>Ligne 2 (en couleur)</label><input name="bd_line2" maxlength="40" value="{{(v.bandeau or {}).line2 or 'ET LIKEZ !'}}"></div></div>
 <label>Pied de page</label><input name="bd_footer" maxlength="40" value="{{(v.bandeau or {}).footer or 'REDIFSTREAM'}}">

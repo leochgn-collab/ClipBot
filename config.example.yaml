@@ -52,7 +52,11 @@ video:
     text_banner: false             # bandeau jaune avec la réplique la plus forte pendant 2,5 s
     fallback: ""                   # texte si aucune réplique forte (ex. « REGARDE JUSQU'À LA FIN »)
   max_duration: 59                 # secondes
-  layout: bandeau                  # bandeau = design A ; flou = ancien fond flou
+  layout: camera                   # camera = caméra du streamer en haut + jeu ; bandeau = design A ; flou = fond flou
+  camera:
+    title: "{streamer} en live sur GTA 6"
+    label: "Clip : {streamer} ({plateforme})"
+    fallback: bandeau              # présentation utilisée si aucune caméra n'est visible
   bandeau:
     line1: "ABONNEZ-VOUS"
     line2: "ET LIKEZ !"

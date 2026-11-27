@@ -1448,7 +1448,9 @@ def transcribe(src, srt_path, cfg):
     lines = []
     for i in range(0, len(words), per):
         chunk = words[i:i + per]
-        text = " ".join(w.word.strip() for w in chunk).upper()
+        text = " ".join(w.word.strip() for w in chunk)
+        if cfg["video"].get("layout") != "camera":      # présentation caméra : sous-titres en minuscules
+            text = text.upper()
         lines.append(f"{len(lines) + 1}\n{_ts(chunk[0].start)} --> {_ts(chunk[-1].end)}\n{text}\n")
     srt_path.write_text("\n".join(lines), encoding="utf-8")
     return True
@@ -1630,6 +1632,334 @@ def render_bandeau(src, work, cfg, with_subs):
     return out
 
 
+# --------------------------------------------------------------------------
+# Présentation « Caméra + jeu » : la caméra du streamer en haut, le jeu en dessous
+# --------------------------------------------------------------------------
+def video_size(path):
+    try:
+        r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                            "stream=width,height", "-of", "csv=p=0", str(path)],
+                           capture_output=True, text=True, timeout=30).stdout.strip()
+        w, h = r.split(",")[:2]
+        return int(w), int(h)
+    except Exception:
+        return 1920, 1080
+
+
+def media_duration(path):
+    try:
+        return float(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                                     "-of", "csv=p=0", str(path)], capture_output=True, text=True,
+                                    timeout=30).stdout.strip())
+    except Exception:
+        return 30.0
+
+
+def _gray_frames(src, n=12, width=960):
+    """Quelques images du clip, en niveaux de gris, réparties sur toute la durée."""
+    import numpy as np
+    W, H = video_size(src)
+    w = width if W >= width else W - W % 2
+    h = int(round(H * w / W / 2)) * 2
+    dur = media_duration(src)
+    frames = []
+    for i in range(n):
+        t = 0.8 + (max(dur - 1.6, 0.1)) * i / max(n - 1, 1)
+        r = subprocess.run(["ffmpeg", "-v", "error", "-ss", f"{t:.2f}", "-i", str(src), "-frames:v", "1",
+                            "-vf", f"scale={w}:{h}", "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+                           capture_output=True, timeout=60)
+        if len(r.stdout) == w * h:
+            frames.append(np.frombuffer(r.stdout, np.uint8).reshape(h, w))
+    return frames
+
+
+def _find_faces(frames):
+    """Visages trouvés image par image : [(index_image, x, y, w, h), ...]."""
+    import cv2
+    import os.path
+    casc = []
+    for f in ("haarcascade_frontalface_alt2.xml", "haarcascade_profileface.xml"):
+        p = os.path.join(getattr(getattr(cv2, "data", None), "haarcascades", ""), f)
+        cl = cv2.CascadeClassifier(p) if os.path.exists(p) else None
+        casc.append(cl if cl is not None and not cl.empty() else None)
+    if casc[0] is None:
+        raise RuntimeError("modèles de visage d'OpenCV introuvables (relance la mise à jour)")
+    out = []
+    for i, g in enumerate(frames):
+        eq = cv2.equalizeHist(g)
+        H = g.shape[0]
+        mx = (int(H * 0.42), int(H * 0.42))      # visage énorme = caméra plein écran, pas d'incrustation
+        found = []
+        for k, c in enumerate(casc):
+            if c is None:
+                continue
+            for img, flip in ((eq, False), (eq[:, ::-1].copy(), True)) if k == 1 else ((eq, False),):
+                for (x, y, w, h) in c.detectMultiScale(img, 1.08, 6, minSize=(18, 18), maxSize=mx):
+                    if flip:
+                        x = g.shape[1] - x - w
+                    found.append((int(x), int(y), int(w), int(h)))
+        for f in found:
+            out.append((i,) + f)
+    return out
+
+
+def _snap_edge(edge, motion, span, lo, hi, far_end, size):
+    """Cherche le bord de l'incrustation entre lo et hi (colonnes, ou lignes si on passe les tableaux transposés).
+    Un vrai bord = une ligne nette sur presque toute la hauteur de la caméra ET un changement de mouvement
+    (fond de la caméra plutôt fixe, jeu qui bouge). Parmi les bons candidats, on garde le plus éloigné du visage.
+    far_end : -1 si on cherche vers 0, +1 si on cherche vers size. Retourne (position, trouvé)."""
+    import numpy as np
+    lo, hi = max(int(lo), 2), min(int(hi), size - 3)
+    if hi - lo >= 3:
+        e = edge[span[0]:span[1], :]
+        m = motion[span[0]:span[1], :]
+        thr = max(12.0, 3.0 * float(np.median(e)))
+        mm = float(m.mean()) + 1.0
+        sc = []
+        for x in range(lo, hi):
+            cont = float((e[:, x] > thr).mean())
+            a, b = m[:, max(0, x - 7):x - 1].mean(), m[:, x + 2:x + 8].mean()
+            sc.append(cont + 0.5 * min(abs(a - b) / mm, 1.0))
+        sc = np.array(sc)
+        if sc.max() >= 0.65:
+            good = np.where(sc >= 0.8 * sc.max())[0]
+            k = good[0] if far_end < 0 else good[-1]
+            return lo + int(k) + (1 if far_end > 0 else 1), True
+    return None, False
+
+
+def detect_facecam(src):
+    """Trouve la caméra du streamer incrustée dans le live.
+    1) un visage qui reste au même endroit sur la plupart des images (la caméra est fixe, le jeu bouge) ;
+    2) on cale le cadre sur les bords nets de l'incrustation (s'il y en a), sinon cadre 16:9 autour du visage.
+    Retourne (x, y, w, h) en fractions de l'image, ou None."""
+    import numpy as np
+    try:
+        import cv2  # noqa: F401
+    except ImportError:
+        log.warning("OpenCV absent : présentation caméra impossible (relance la mise à jour)")
+        return None
+    frames = _gray_frames(src)
+    if len(frames) < 4:
+        return None
+    H, W = frames[0].shape
+    faces = _find_faces(frames)
+    if not faces:
+        return None
+    # regroupe les visages au même endroit
+    clusters = []
+    for f in faces:
+        i, x, y, w, h = f
+        cx, cy = x + w / 2, y + h / 2
+        for cl in clusters:
+            if abs(cl["cx"] - cx) < 0.6 * cl["w"] and abs(cl["cy"] - cy) < 0.6 * cl["w"]:
+                cl["items"].append(f)
+                cl["frames"].add(i)
+                n = len(cl["items"])
+                cl["cx"] += (cx - cl["cx"]) / n
+                cl["cy"] += (cy - cl["cy"]) / n
+                cl["w"] += (w - cl["w"]) / n
+                break
+        else:
+            clusters.append({"cx": cx, "cy": cy, "w": w, "items": [f], "frames": {i}})
+    best = max(clusters, key=lambda c: (len(c["frames"]), c["w"]))
+    if len(best["frames"]) < max(3, int(0.35 * len(frames))):
+        return None
+    it = np.array([f[1:] for f in best["items"]], float)
+    fx, fy, fw, fh = np.median(it, axis=0)
+    fcx, fcy = fx + fw / 2, fy + fh / 2
+
+    # bords « fixes » (présents sur presque toutes les images) et mouvement de chaque pixel
+    st = np.stack([f.astype(np.int16) for f in frames])
+    gx = np.percentile(np.abs(np.diff(st, axis=2)), 25, axis=0)   # bords verticaux (H, W-1)
+    gy = np.percentile(np.abs(np.diff(st, axis=1)), 25, axis=0)   # bords horizontaux (H-1, W)
+    mo = st.astype(np.float32).std(axis=0)
+
+    # cadre par défaut : 16:9, visage à ~40 % de la hauteur, ~4 visages de large
+    dw = 4.2 * fw
+    dh = dw * 9 / 16
+    L, R = fcx - dw / 2, fcx + dw / 2
+    T, B = fcy - 0.40 * dh, fcy + 0.60 * dh
+    rows = (int(max(0, fy - 0.8 * fh)), int(min(H - 1, fy + 2.0 * fh)))
+    cols = (int(max(0, fx - 1.0 * fw)), int(min(W - 1, fx + 2.0 * fw)))
+    l, okl = _snap_edge(gx, mo, rows, fcx - 3.6 * fw, fx - 0.3 * fw, -1, W)
+    r, okr = _snap_edge(gx, mo, rows, fx + 1.3 * fw, fcx + 3.6 * fw, +1, W)
+    t, okt = _snap_edge(gy.T, mo.T, cols, fcy - 2.8 * fh, fy - 0.15 * fh, -1, H)
+    b, okb = _snap_edge(gy.T, mo.T, cols, fy + 1.4 * fh, fcy + 4.2 * fh, +1, H)
+    # côté non trouvé mais bord de l'écran tout proche : la caméra est collée au bord
+    if not okl and fcx - 3.6 * fw <= 0:
+        l, okl = 0, True
+    if not okr and fcx + 3.6 * fw >= W:
+        r, okr = W, True
+    if not okt and fcy - 2.8 * fh <= 0:
+        t, okt = 0, True
+    if not okb and fcy + 4.2 * fh >= H:
+        b, okb = H, True
+    # bord trouvé à quelques pixels du bord de l'écran : c'est le bord de l'écran
+    if okl and l < 0.01 * W:
+        l = 0
+    if okr and r > 0.99 * W:
+        r = W
+    if okt and t < 0.01 * H:
+        t = 0
+    if okb and b > 0.99 * H:
+        b = H
+    # un côté non trouvé : on garde la taille par défaut à partir du côté trouvé
+    l = l if okl else (r - dw if okr else L)
+    r = r if okr else l + dw
+    t = t if okt else (b - dh if okb else T)
+    b = b if okb else t + dh
+    l, r, t, b = max(0, l), min(W, r), max(0, t), min(H, b)
+    bw, bh = r - l, b - t
+    sane = (bw > 1.6 * fw and bh > 1.5 * fh and 0.7 <= bw / max(bh, 1) <= 2.8
+            and bw * bh < 0.45 * W * H and l <= fx and r >= fx + fw and t <= fy and b >= fy + fh)
+    if not sane:   # bords trouvés incohérents : cadre par défaut autour du visage
+        l, r = max(0, L), min(W, R)
+        t, b = max(0, T), min(H, B)
+        bw, bh = r - l, b - t
+    log.info("Caméra trouvée : visage sur %d/%d images, cadre %d×%d à (%d, %d) sur %d×%d%s",
+             len(best["frames"]), len(frames), bw, bh, l, t, W, H,
+             " (bords de l'incrustation)" if sane and (okl or okr or okt or okb) else "")
+    return (l / W, t / H, bw / W, bh / H)
+
+
+def facecam_box(src, c):
+    """Caméra du clip ; si on ne la voit pas sur ce clip, celle déjà trouvée pour ce streamer (≤ 30 jours)."""
+    f = BASE / "work" / "facecam.json"
+    key = (c or {}).get("channel", "?").lower()
+    try:
+        mem = json.loads(f.read_text())
+    except (OSError, ValueError):
+        mem = {}
+    try:
+        box = detect_facecam(src)
+    except Exception as e:
+        log.warning("Recherche de la caméra impossible : %s", e)
+        box = None
+    if box:
+        mem[key] = {"box": box, "t": time.time()}
+        try:
+            f.parent.mkdir(exist_ok=True)
+            f.write_text(json.dumps(mem))
+        except OSError:
+            pass
+        return box
+    old = mem.get(key)
+    if old and time.time() - old.get("t", 0) < 30 * 86400:
+        log.info("Caméra pas visible sur ce clip : cadre déjà connu pour %s", c.get("channel"))
+        return tuple(old["box"])
+    return None
+
+
+def _cam_font(v):
+    for p in (resolve((v.get("camera") or {}).get("font", "assets/fonts/Anton-Regular.ttf")),
+              Path("/usr/share/fonts/truetype/liberation/LiberationSansNarrow-Bold.ttf"),
+              Path("/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Bold.ttf")):
+        if p.exists():
+            return str(p)
+    return FONT_FALLBACK
+
+
+def streamer_name(channel):
+    n = re.sub(r"[\s_\-]*(rediffs?|replays?|vods?|lives?|tv)$", "", (channel or "").strip(), flags=re.I) or channel
+    return n[:1].upper() + n[1:] if n.islower() else n
+
+
+def _srt_to_ass_plain(srt_path, ass_path, fontname, size, top_y):
+    """Sous-titres simples (blanc, gros contour noir), centrés, posés sur le jeu."""
+    def t(ts):
+        h, m, rest = ts.strip().split(":")
+        sec, ms = rest.split(",")
+        return f"{int(h)}:{m}:{sec}.{ms[:2]}"
+    events = []
+    for block in srt_path.read_text(encoding="utf-8").strip().split("\n\n"):
+        lines = block.strip().splitlines()
+        if len(lines) < 3 or "-->" not in lines[1]:
+            continue
+        start, end = lines[1].split("-->")
+        text = " ".join(lines[2:]).replace("{", "(").replace("}", ")").strip()
+        events.append(f"Dialogue: 0,{t(start)},{t(end)},Sub,,0,0,0,,{text}")
+    ass_path.write_text(
+        "[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\nWrapStyle: 0\n\n"
+        "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, "
+        "BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, "
+        "Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        f"Style: Sub,{fontname},{size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,6,2,8,70,70,{top_y},1\n\n"
+        "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+        + "\n".join(events) + "\n", encoding="utf-8")
+
+
+def render_camera(src, work, cfg, with_subs):
+    """Caméra du streamer en haut (agrandie), jeu en dessous, titre en haut, étiquette « Clip : … »."""
+    v = cfg["video"]
+    cam = v["_cam"]
+    info = v.get("_clip") or {}
+    cc = v.get("camera") or {}
+    W, H = video_size(src)
+    font = _cam_font(v)
+    dur = float(v["max_duration"])
+    fps = 60 if video_fps(src) >= 50 else 30
+    qp = quality_profile(cfg)
+    lz = "" if qp.get("plain") else ":flags=lanczos"
+    TOP, CAM_H, LINE = 120, 640, 8
+    G0 = TOP + LINE + CAM_H + LINE
+    GH = 1920 - G0
+    ev = lambda n: max(2, int(n) // 2 * 2)
+    cx, cy = ev(cam[0] * W), ev(cam[1] * H)
+    cw, ch = min(ev(cam[2] * W), W - cx), min(ev(cam[3] * H), H - cy)
+    # jeu : bande centrale, décalée si besoin pour ne pas reprendre la caméra
+    gw = min(W, ev(1080 * H / GH))
+    center = (W - gw) // 2
+    choices = [center, cx + cw + 8, cx - gw - 8]
+    def overlap(gx):
+        return max(0, min(gx + gw, cx + cw) - max(gx, cx))
+    choices = [min(max(0, g), W - gw) for g in choices]
+    gx = ev(min(choices, key=lambda g: (overlap(g), abs(g - center))))
+
+    names = {"streamer": streamer_name(info.get("channel", "")),
+             "plateforme": "YouTube" if info.get("platform") == "youtube" else "Twitch"}
+    def fill(tpl):
+        for k, x in names.items():
+            tpl = tpl.replace("{" + k + "}", x)
+        return tpl
+    title = _dt_escape(fill(cc.get("title", "{streamer} en live sur GTA 6"))[:40])
+    label = _dt_escape(fill(cc.get("label", "Clip : {streamer} ({plateforme})"))[:40])
+    c1 = cc.get("color", "#22D3EE").lstrip("#")
+    c2 = cc.get("color2", "#FF2D8C").lstrip("#")
+
+    g = (f"color=c=0x0E0F13:s=1080x1920:r={fps}:d={dur}[bg0];"
+         "[0:v]split=2[s1][s2];"
+         f"[s1]crop={cw}:{ch}:{cx}:{cy},scale=1080:{CAM_H}:force_original_aspect_ratio=increase{lz},"
+         f"crop=1080:{CAM_H},setsar=1,fps={fps}[cam];"
+         f"[s2]crop={gw}:{H}:{gx}:0,scale=1080:{GH}:force_original_aspect_ratio=increase{lz},"
+         f"crop=1080:{GH},setsar=1,fps={fps}[game];"
+         f"[bg0]drawbox=x=0:y=0:w=1080:h={TOP}:color=0x140A28:t=fill,"
+         f"drawbox=x=0:y={TOP}:w=1080:h={LINE}:color=0x{c2}:t=fill,"
+         f"drawbox=x=0:y={TOP + LINE + CAM_H}:w=1080:h={LINE}:color=0x{c1}:t=fill[bg1];"
+         f"[bg1][cam]overlay=0:{TOP + LINE}:shortest=1[b2];"
+         f"[b2][game]overlay=0:{G0}:shortest=1[b3];"
+         f"[b3]drawtext=fontfile='{font}':expansion=none:text='{title}':fontsize=64:fontcolor=0x{c1}:"
+         f"x=(w-text_w)/2:y=({TOP}-text_h)/2,"
+         f"drawtext=fontfile='{font}':expansion=none:text='{label}':fontsize=40:fontcolor=white:"
+         f"box=1:boxcolor=0x281440@0.88:boxborderw=14:x=38:y={TOP + LINE + CAM_H - 78}"
+         + _hook_filter(work, font, c1, G0 + 80) + ",format=yuv420p")
+    if with_subs and (work / "subs.srt").exists():
+        fontname = "Anton" if font.endswith("Anton-Regular.ttf") else \
+            "Liberation Sans Narrow" if "Narrow" in font else "DejaVu Sans"
+        _srt_to_ass_plain(work / "subs.srt", work / "subs.ass", fontname, 84 if fontname == "Anton" else 76,
+                          G0 + int(GH * 0.68))
+        g += f",subtitles=subs.ass:fontsdir='{Path(font).parent}'"
+    g += _finish_filters(qp) + "[v]"
+    out = work / "final.mp4"
+    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", src.name, "-t", str(dur),
+           "-filter_complex", g, "-map", "[v]", "-map", "0:a?",
+           "-c:v", "libx264", "-preset", qp["preset"], "-crf", str(qp["crf"]),
+           *([] if qp.get("plain") else ["-profile:v", "high", "-threads", "4", "-x264-params", "rc-lookahead=30"]),
+           "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart", out.name]
+    run_ffmpeg(cmd, work)
+    return out
+
+
 def run_ffmpeg(cmd, cwd):
     """Lance ffmpeg et, en cas d'échec, donne la VRAIE raison (dernières lignes d'erreur, mémoire…)."""
     r = subprocess.run(cmd, cwd=cwd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
@@ -1653,12 +1983,23 @@ def run_ffmpeg(cmd, cwd):
     return r
 
 
-def render(src, work, cfg, with_subs):
+def render(src, work, cfg, with_subs, c=None):
     """Montage. Si la qualité choisie est trop lourde pour le serveur, on réessaie un cran en dessous."""
     global _whisper_model
     _whisper_model = None                 # libère la mémoire de Whisper avant le montage
     import gc
     gc.collect()
+    v = cfg["video"]
+    if v.get("layout") == "camera":
+        progress("Recherche de la caméra du streamer", (c or {}).get("channel", ""))
+        box = facecam_box(src, c)
+        if box:
+            cfg = {**cfg, "video": {**v, "_cam": box, "_clip": {"channel": (c or {}).get("channel", ""),
+                                                                 "platform": (c or {}).get("platform", "")}}}
+        else:
+            fb = (v.get("camera") or {}).get("fallback", "bandeau")
+            log.info("Pas de caméra visible sur ce clip : présentation « %s » à la place", fb)
+            cfg = {**cfg, "video": {**v, "layout": fb if fb in ("bandeau", "flou") else "bandeau"}}
     order = ["max", "haute", "normale", "secours"]
     level = cfg["video"].get("quality", "max")
     tries = order[order.index(level):] if level in order else [level]
@@ -1678,7 +2019,9 @@ def render(src, work, cfg, with_subs):
 
 def _render(src, work, cfg, with_subs):
     v = cfg["video"]
-    if v.get("layout", "flou") == "bandeau":
+    if v.get("layout") == "camera" and v.get("_cam"):
+        return render_camera(src, work, cfg, with_subs)
+    if v.get("layout", "flou") in ("bandeau", "camera"):
         return render_bandeau(src, work, cfg, with_subs)
     lg = v.get("logo") or {}
     logo = resolve(lg.get("file", "assets/logo.png"))
@@ -2212,7 +2555,7 @@ def _process(cfg, state, candidates, budget, yt, tt, dry_run):
             except Exception as e:
                 log.warning("Texte d'accroche ignoré : %s", e)
             progress("Montage de la vidéo", f"{c['channel']} — {c['title'][:60]}")
-            final = render(src, work, cfg, subs)
+            final = render(src, work, cfg, subs, c)
             meta = build_meta(cfg, c)
 
             if dry_run:

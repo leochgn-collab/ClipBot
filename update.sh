@@ -45,6 +45,13 @@ if [ ! -s "$DIR/assets/fonts/RubikMonoOne-Regular.ttf" ]; then
     || echo "⚠️ Police non téléchargée : police de secours utilisée."
 fi
 
+if [ ! -s "$DIR/assets/fonts/Anton-Regular.ttf" ]; then
+  curl -fsSL -o "$DIR/assets/fonts/Anton-Regular.ttf" \
+    https://github.com/google/fonts/raw/main/ofl/anton/Anton-Regular.ttf \
+    || echo "⚠️ Police Anton non téléchargée : police de secours utilisée."
+fi
+"$DIR/venv/bin/python" -c "import cv2; print('OpenCV :', cv2.__version__)" 2>/dev/null || echo "⚠️  OpenCV absent : la présentation Caméra + jeu ne marchera pas"
+
 echo "→ Nouveaux réglages (les tiens sont conservés)…"
 "$DIR/venv/bin/python" - <<'PY'
 import yaml, shutil
@@ -61,6 +68,8 @@ merge(c, ex)
 v = c.setdefault("video", {})
 if v.get("quality") == "haute" and not v.get("quality_choisie"):
     v["quality"] = "max"            # meilleure qualité par défaut (tant que tu n'as pas choisi toi-même)
+if not v.get("layout_choisi"):
+    v["layout"] = "camera"          # nouvelle présentation : caméra du streamer + jeu
 shutil.copy(p, p + ".avant-maj")
 open(p, "w", encoding="utf-8").write(yaml.safe_dump(c, allow_unicode=True, sort_keys=False))
 PY
