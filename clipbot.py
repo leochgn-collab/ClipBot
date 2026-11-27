@@ -1796,13 +1796,14 @@ def detect_facecam(src):
     if not okb and fcy + 4.2 * fh >= H:
         b, okb = H, True
     # bord trouvé à quelques pixels du bord de l'écran : c'est le bord de l'écran
-    if okl and l < 0.01 * W:
+    near = 0.5 * fw            # moins d'un demi-visage du bord : la caméra est collée au bord
+    if okl and l < near:
         l = 0
-    if okr and r > 0.99 * W:
+    if okr and W - r < near:
         r = W
-    if okt and t < 0.01 * H:
+    if okt and t < near:
         t = 0
-    if okb and b > 0.99 * H:
+    if okb and H - b < near:
         b = H
     # un côté non trouvé : on garde la taille par défaut à partir du côté trouvé
     l = l if okl else (r - dw if okr else L)
