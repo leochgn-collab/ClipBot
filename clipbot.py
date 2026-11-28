@@ -1927,10 +1927,19 @@ def render_camera(src, work, cfg, with_subs):
         for k, x in names.items():
             tpl = tpl.replace("{" + k + "}", x)
         return tpl
-    title = _dt_escape(fill(cc.get("title", "{streamer} en live sur GTA 6"))[:40])
+    # styles : (fond du titre, couleur du titre, ligne sous le titre, ligne au-dessus du jeu,
+    #           fond de l'étiquette, texte de l'étiquette, titre en majuscules)
+    styles = {
+        "rouge":  ("E61E32", "FFFFFF", "0E0F13", "E61E32", "FFFFFF", "E61E32", True),
+        "jaune":  ("FFD600", "0F0F0F", "0E0F13", "FFD600", "FFD600", "0F0F0F", True),
+        "twitch": ("6441A5", "FFFFFF", "FFFFFF", "9146FF", "9146FF", "FFFFFF", True),
+        "bleu":   ("140A28", "22D3EE", "FF2D8C", "22D3EE", "281440", "FFFFFF", False),
+    }
+    bar, tcol, l1, l2, pill, ptxt, upper = styles.get(cc.get("style", "rouge"), styles["rouge"])
+    t = fill(cc.get("title", "{streamer} en live sur GTA 6"))[:40]
+    title = _dt_escape(t.upper() if upper else t)
     label = _dt_escape(fill(cc.get("label", "Clip : {streamer} ({plateforme})"))[:40])
-    c1 = cc.get("color", "#22D3EE").lstrip("#")
-    c2 = cc.get("color2", "#FF2D8C").lstrip("#")
+    c1 = l2
 
     g = (f"color=c=0x0E0F13:s=1080x1920:r={fps}:d={dur}[bg0];"
          "[0:v]split=2[s1][s2];"
@@ -1938,15 +1947,15 @@ def render_camera(src, work, cfg, with_subs):
          f"crop=1080:{CAM_H},setsar=1,fps={fps}[cam];"
          f"[s2]crop={gw}:{H}:{gx}:0,scale=1080:{GH}:force_original_aspect_ratio=increase{lz},"
          f"crop=1080:{GH},setsar=1,fps={fps}[game];"
-         f"[bg0]drawbox=x=0:y=0:w=1080:h={TOP}:color=0x140A28:t=fill,"
-         f"drawbox=x=0:y={TOP}:w=1080:h={LINE}:color=0x{c2}:t=fill,"
-         f"drawbox=x=0:y={TOP + LINE + CAM_H}:w=1080:h={LINE}:color=0x{c1}:t=fill[bg1];"
+         f"[bg0]drawbox=x=0:y=0:w=1080:h={TOP}:color=0x{bar}:t=fill,"
+         f"drawbox=x=0:y={TOP}:w=1080:h={LINE}:color=0x{l1}:t=fill,"
+         f"drawbox=x=0:y={TOP + LINE + CAM_H}:w=1080:h={LINE}:color=0x{l2}:t=fill[bg1];"
          f"[bg1][cam]overlay=0:{TOP + LINE}:shortest=1[b2];"
          f"[b2][game]overlay=0:{G0}:shortest=1[b3];"
-         f"[b3]drawtext=fontfile='{font}':expansion=none:text='{title}':fontsize=64:fontcolor=0x{c1}:"
+         f"[b3]drawtext=fontfile='{font}':expansion=none:text='{title}':fontsize=64:fontcolor=0x{tcol}:"
          f"x=(w-text_w)/2:y=({TOP}-text_h)/2,"
-         f"drawtext=fontfile='{font}':expansion=none:text='{label}':fontsize=40:fontcolor=white:"
-         f"box=1:boxcolor=0x281440@0.88:boxborderw=14:x=38:y={TOP + LINE + CAM_H - 78}"
+         f"drawtext=fontfile='{font}':expansion=none:text='{label}':fontsize=40:fontcolor=0x{ptxt}:"
+         f"box=1:boxcolor=0x{pill}@0.95:boxborderw=14:x=38:y={TOP + LINE + CAM_H - 78}"
          + _hook_filter(work, font, c1, G0 + 80) + ",format=yuv420p")
     if with_subs and (work / "subs.srt").exists():
         fontname = "Anton" if font.endswith("Anton-Regular.ttf") else \

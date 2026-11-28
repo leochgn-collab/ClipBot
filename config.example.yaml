@@ -56,6 +56,7 @@ video:
   camera:
     title: "{streamer} en live sur GTA 6"
     label: "Clip : {streamer} ({plateforme})"
+    style: rouge                   # rouge, jaune, twitch ou bleu
     fallback: bandeau              # présentation utilisée si aucune caméra n'est visible
   bandeau:
     line1: "ABONNEZ-VOUS"

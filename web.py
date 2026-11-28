@@ -1097,6 +1097,7 @@ def settings():
         cam = v.setdefault("camera", {})
         cam["title"] = (f.get("cam_title") or "{streamer} en live sur GTA 6").strip()[:60]
         cam["label"] = (f.get("cam_label") or "Clip : {streamer} ({plateforme})").strip()[:60]
+        cam["style"] = f.get("cam_style") if f.get("cam_style") in ("rouge", "jaune", "twitch", "bleu") else "rouge"
         bd = v.setdefault("bandeau", {})
         for k, d in (("line1", "ABONNEZ-VOUS"), ("line2", "ET LIKEZ !"), ("footer", "REDIFSTREAM")):
             bd[k] = (f.get("bd_" + k) or d).strip()[:40]
@@ -1235,6 +1236,12 @@ def settings():
 <option value="bandeau" {{'selected' if v.layout == 'bandeau'}}>A · Bandeau (fond noir, message en haut, gameplay encadré)</option>
 <option value="flou" {{'selected' if v.layout not in ('bandeau', 'camera')}}>Fond flou (ancien)</option></select>
 <p class="mut" style="font-size:13px">Caméra + jeu : ClipBot trouve tout seul la caméra dans le live. S'il n'y en a pas, le clip sort en « Bandeau ».</p>
+<label>Style du titre et de l'étiquette (Caméra + jeu)</label><select name="cam_style">
+{% set cs = (v.camera or {}).style or 'rouge' %}
+<option value="rouge" {{'selected' if cs == 'rouge'}}>Rouge (titre blanc en majuscules)</option>
+<option value="jaune" {{'selected' if cs == 'jaune'}}>Jaune (titre noir en majuscules)</option>
+<option value="twitch" {{'selected' if cs == 'twitch'}}>Violet Twitch</option>
+<option value="bleu" {{'selected' if cs == 'bleu'}}>Bleu sur violet foncé (ancien)</option></select>
 <label>Titre du haut (Caméra + jeu)</label><input name="cam_title" maxlength="60" value="{{(v.camera or {}).title or '{streamer} en live sur GTA 6'}}">
 <label>Étiquette sur la caméra</label><input name="cam_label" maxlength="60" value="{{(v.camera or {}).label or 'Clip : {streamer} ({plateforme})'}}">
 <p class="mut" style="font-size:13px">{streamer} = nom du streamer, {plateforme} = Twitch ou YouTube.</p>
